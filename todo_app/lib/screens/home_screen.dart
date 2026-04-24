@@ -162,9 +162,16 @@ class _HomeScreenState extends State<HomeScreen> {
     final raw = prefs.getString(_taskConfigKey);
     if (raw == null || !mounted) return;
     try {
-      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      final list = (jsonDecode(raw) as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      final parsed = list.map(TaskConfig.fromJson).toList();
+      final defaults = TaskConfig.defaults();
+      while (parsed.length < defaults.length) {
+        parsed.add(defaults[parsed.length]);
+      }
       setState(() {
-        _taskConfigs = list.map(TaskConfig.fromJson).toList();
+        _taskConfigs = parsed.take(defaults.length).toList();
       });
     } catch (_) {}
   }
@@ -216,6 +223,16 @@ class _HomeScreenState extends State<HomeScreen> {
   bool get _isToday => _viewedDate == _dateOnly(DateTime.now());
   bool get _isViewedSunday => _viewedDate.weekday == DateTime.sunday;
 
+  TaskConfig _cfgForTask(int n) {
+    final i = n - 1;
+    if (i >= 0 && i < _taskConfigs.length) return _taskConfigs[i];
+    final defaults = TaskConfig.defaults();
+    return defaults[i.clamp(0, defaults.length - 1)];
+  }
+
+  bool _isTaskRequired(int n) => _cfgForTask(n).isRequired;
+  bool _isTaskRepeating(int n) => _cfgForTask(n).isRepeating;
+
   // ── Task initialisation ───────────────────────────────────────────────────
 
   /// Rebuilds _tasks + _controllers for [date] (synchronous skeleton).
@@ -250,7 +267,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final saved = prefs.getString(_taskKey(n, date));
         final value = (saved != null && saved.isNotEmpty)
             ? saved
-            : defaults[n - 2];
+            : (_isTaskRepeating(n) ? defaults[n - 2] : '');
         _tasks[n - 1].title = value;
         _controllers[n - 1].text = value;
       }
@@ -319,10 +336,20 @@ class _HomeScreenState extends State<HomeScreen> {
   // ── Sunday planner ────────────────────────────────────────────────────────
 
   bool _allNextWeekTask2sSaved(SharedPreferences prefs, DateTime sunday) {
+    final requiredRepeating = <int>[];
+    for (int n = 2; n <= 5; n++) {
+      if (_isTaskRepeating(n) && _isTaskRequired(n)) {
+        requiredRepeating.add(n);
+      }
+    }
+    if (requiredRepeating.isEmpty) return false;
+
     final nextMonday = sunday.add(Duration(days: 8 - sunday.weekday));
     for (int i = 0; i < 7; i++) {
       final date = nextMonday.add(Duration(days: i));
-      if ((prefs.getString(_taskKey(2, date)) ?? '').isEmpty) return false;
+      for (final n in requiredRepeating) {
+        if ((prefs.getString(_taskKey(n, date)) ?? '').isEmpty) return false;
+      }
     }
     return true;
   }
@@ -351,6 +378,7 @@ class _HomeScreenState extends State<HomeScreen> {
         weekdayLabels: _weekdayLabels,
         controllers: planControllers,
         history: _taskHistory,
+        taskConfigs: _taskConfigs,
       ),
     );
 
@@ -358,9 +386,11 @@ class _HomeScreenState extends State<HomeScreen> {
       for (int day = 0; day < 7; day++) {
         final date = nextMonday.add(Duration(days: day));
         for (int offset = 0; offset < 4; offset++) {
+          final taskNumber = offset + 2;
+          if (!_isTaskRepeating(taskNumber)) continue;
           final text = planControllers[day][offset].text.trim();
           if (text.isNotEmpty) {
-            await prefs.setString(_taskKey(offset + 2, date), text);
+            await prefs.setString(_taskKey(taskNumber, date), text);
             _saveToHistory(text);
             _recordTaskUsage(text);
           }
@@ -438,6 +468,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final key = 'stat_total_task$n';
     final current = prefs.getInt(key) ?? 0;
     await prefs.setInt(key, done ? current + 1 : (current > 0 ? current - 1 : 0));
+  }
+
+  Future<void> _saveTaskTitle(int n, DateTime date, String title) async {
+    if (n < 2 || n > 5) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_taskKey(n, date), title);
   }
 
   // ── Weekly reward reset ───────────────────────────────────────────────────
@@ -528,7 +564,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (prefs.getBool(checkKey) == true) return;
     await prefs.setBool(checkKey, true);
 
-    // Collect tasks 1-4 that are NOT marked done for yesterday.
+    // Collect required tasks that are NOT marked done for yesterday.
     const taskDefaults = [
       '', // task 1 comes from day schedule
       'Daily report schreiben',
@@ -536,7 +572,8 @@ class _HomeScreenState extends State<HomeScreen> {
       'Morgen planen',
     ];
     final missed = <int, String>{};
-    for (int n = 1; n <= 4; n++) {
+    for (int n = 1; n <= 5; n++) {
+      if (!_isTaskRequired(n)) continue;
       if (prefs.getBool(_doneKey(n, yesterday)) != true) {
         String title;
         if (n == 1) {
@@ -634,6 +671,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _editingIndex = null;
     });
     if (text.isNotEmpty) {
+      _saveTaskTitle(index + 1, _viewedDate, text);
       _saveToHistory(text);
       // Track usage for tasks 2-5 only (index 1-4); task 1 is always the
       // fixed day-of-week entry and should not skew the frequency chart.
@@ -1267,12 +1305,14 @@ class WeeklyPlannerDialog extends StatefulWidget {
 
   /// Autocomplete suggestions drawn from the user's task title history.
   final List<String> history;
+  final List<TaskConfig>? taskConfigs;
 
   const WeeklyPlannerDialog({
     required this.nextMonday,
     required this.weekdayLabels,
     required this.controllers,
     this.history = const [],
+    this.taskConfigs,
   });
 
   @override
@@ -1281,33 +1321,68 @@ class WeeklyPlannerDialog extends StatefulWidget {
 
 class _WeeklyPlannerDialogState extends State<WeeklyPlannerDialog> {
   late final List<bool> _expanded;
+  late final List<int> _requiredOffsets;
+  late final List<int> _optionalOffsets;
   bool _canSave = false;
+
+  TaskConfig _effectiveCfgForTask(int n) {
+    if (widget.taskConfigs != null && n - 1 < widget.taskConfigs!.length) {
+      return widget.taskConfigs![n - 1];
+    }
+    // Backward-compatible defaults for tests/direct usage:
+    // task2 required repeating, task3-5 optional repeating.
+    if (n == 2) {
+      return TaskConfig(isEditable: true, isRepeating: true, isRequired: true);
+    }
+    return TaskConfig(isEditable: true, isRepeating: true, isRequired: false);
+  }
 
   @override
   void initState() {
     super.initState();
+    _requiredOffsets = [];
+    _optionalOffsets = [];
+    for (int offset = 0; offset < 4; offset++) {
+      final cfg = _effectiveCfgForTask(offset + 2);
+      if (!cfg.isRepeating) continue;
+      if (cfg.isRequired) {
+        _requiredOffsets.add(offset);
+      } else {
+        _optionalOffsets.add(offset);
+      }
+    }
+
     // Pre-expand days that already have optional tasks saved.
     _expanded = List.generate(
       7,
-      (day) => widget.controllers[day].sublist(1).any((c) => c.text.isNotEmpty),
+      (day) => _optionalOffsets.any(
+        (offset) => widget.controllers[day][offset].text.isNotEmpty,
+      ),
     );
     _updateCanSave();
     for (int day = 0; day < 7; day++) {
-      widget.controllers[day][0].addListener(_updateCanSave);
+      for (final offset in _requiredOffsets) {
+        widget.controllers[day][offset].addListener(_updateCanSave);
+      }
     }
   }
 
   @override
   void dispose() {
     for (int day = 0; day < 7; day++) {
-      widget.controllers[day][0].removeListener(_updateCanSave);
+      for (final offset in _requiredOffsets) {
+        widget.controllers[day][offset].removeListener(_updateCanSave);
+      }
     }
     super.dispose();
   }
 
   void _updateCanSave() {
-    final allFilled = widget.controllers
-        .every((dc) => dc[0].text.trim().isNotEmpty);
+    final allFilled = _requiredOffsets.every(
+      (offset) => widget.controllers.every(
+        (dc) => dc[offset].text.trim().isNotEmpty,
+      ),
+    );
     if (allFilled != _canSave) setState(() => _canSave = allFilled);
   }
 
@@ -1354,54 +1429,65 @@ class _WeeklyPlannerDialogState extends State<WeeklyPlannerDialog> {
           ),
           const SizedBox(height: 4),
 
-          // ── Required: Task 2 ─────────────────────────────────────────────
-          _AutocompleteField(
-            controller: widget.controllers[day][0],
-            history: widget.history,
-            labelText: 'Aufgabe 2  *',
-            textInputAction: TextInputAction.next,
-          ),
+          // ── Required repeating tasks ─────────────────────────────────────
+          for (int i = 0; i < _requiredOffsets.length; i++)
+            Padding(
+              padding: EdgeInsets.only(top: i == 0 ? 0 : 6),
+              child: _AutocompleteField(
+                controller: widget.controllers[day][_requiredOffsets[i]],
+                history: widget.history,
+                labelText: 'Aufgabe ${_requiredOffsets[i] + 2}  *',
+                textInputAction: TextInputAction.next,
+              ),
+            ),
 
-          // ── Optional: Tasks 3–5 ──────────────────────────────────────────
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            child: _expanded[day]
-                ? Column(
-                    key: ValueKey('expanded_$day'),
-                    children: [
-                      const SizedBox(height: 6),
-                      for (int offset = 1; offset <= 3; offset++)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: _AutocompleteField(
-                            controller: widget.controllers[day][offset],
-                            history: widget.history,
-                            labelText: 'Aufgabe ${offset + 2}  (optional)',
-                            textInputAction: offset < 3
-                                ? TextInputAction.next
-                                : TextInputAction.done,
+          if (_requiredOffsets.isEmpty)
+            Text(
+              'Keine wiederholenden Pflichtaufgaben konfiguriert.',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+
+          // ── Optional repeating tasks ─────────────────────────────────────
+          if (_optionalOffsets.isNotEmpty)
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: _expanded[day]
+                  ? Column(
+                      key: ValueKey('expanded_$day'),
+                      children: [
+                        const SizedBox(height: 6),
+                        for (int i = 0; i < _optionalOffsets.length; i++)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: _AutocompleteField(
+                              controller: widget.controllers[day][_optionalOffsets[i]],
+                              history: widget.history,
+                              labelText: 'Aufgabe ${_optionalOffsets[i] + 2}  (optional)',
+                              textInputAction: i < _optionalOffsets.length - 1
+                                  ? TextInputAction.next
+                                  : TextInputAction.done,
+                            ),
                           ),
+                      ],
+                    )
+                  : Align(
+                      key: ValueKey('collapsed_$day'),
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () => setState(() => _expanded[day] = true),
+                        icon: const Icon(Icons.add, size: 16),
+                        label: const Text(
+                          'Weitere Aufgaben hinzufügen (optional)',
+                          style: TextStyle(fontSize: 12),
                         ),
-                    ],
-                  )
-                : Align(
-                    key: ValueKey('collapsed_$day'),
-                    alignment: Alignment.centerLeft,
-                    child: TextButton.icon(
-                      onPressed: () => setState(() => _expanded[day] = true),
-                      icon: const Icon(Icons.add, size: 16),
-                      label: const Text(
-                        'Weitere Aufgaben hinzufügen (optional)',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                      style: TextButton.styleFrom(
-                        padding: EdgeInsets.zero,
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        style: TextButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
                       ),
                     ),
-                  ),
-          ),
+            ),
           const Divider(height: 20),
         ],
       ),

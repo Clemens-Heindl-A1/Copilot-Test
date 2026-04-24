@@ -7,7 +7,14 @@ import 'screens/right_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Seed realistic test data in debug builds (one-time, idempotent).
-  assert(() { seedDebugData(); return true; }());
+  var isDebug = false;
+  assert(() {
+    isDebug = true;
+    return true;
+  }());
+  if (isDebug) {
+    await seedDebugData();
+  }
   runApp(const TodoApp());
 }
 
