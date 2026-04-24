@@ -73,7 +73,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   // ── Day-of-week schedule for task 1 ──────────────────────────────────────
-  static const Map<int, String> _dayTasks = {
+  static const Map<int, String> _defaultDayTasks = {
     1: 'Rasieren',
     2: 'Pfadfinder',
     3: 'Haare waschen',
@@ -82,6 +82,9 @@ class _HomeScreenState extends State<HomeScreen> {
     6: 'Haare waschen',
     7: 'Nächste Woche planen',
   };
+
+  Map<int, String> _dayTasks = Map.of(_HomeScreenState._defaultDayTasks);
+  static const String _dayTasksKey = 'day_tasks';
 
   static const List<String> _weekdayLabels = [
     'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag',
@@ -133,7 +136,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _weekStart  = _mondayOf(today);
     _monthStart = DateTime(today.year, today.month, 1);
     _initTasksForDate(today);
-    _loadTasksForDate(today);
+    _loadDayTasks().then((_) => _loadTasksForDate(today));
     _maybeDoWeeklyReset();
     _maybeDoAccountabilityCheck();
     _loadTaskHistory();
@@ -173,6 +176,25 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  Future<void> _loadDayTasks() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_dayTasksKey);
+    if (raw == null || !mounted) return;
+    try {
+      final map = (jsonDecode(raw) as Map<String, dynamic>)
+          .map((k, v) => MapEntry(int.parse(k), v as String));
+      setState(() => _dayTasks = map);
+    } catch (_) {}
+  }
+
+  Future<void> _saveDayTasks() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _dayTasksKey,
+      jsonEncode(_dayTasks.map((k, v) => MapEntry(k.toString(), v))),
+    );
+  }
+
   Future<void> _loadTaskConfig() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_taskConfigKey);
@@ -201,13 +223,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openSettings() async {
-    final updated = await showDialog<List<TaskConfig>>(
+    final result = await showDialog<_SettingsResult>(
       context: context,
-      builder: (_) => _TaskSettingsDialog(configs: _taskConfigs),
+      builder: (_) => _TaskSettingsDialog(
+        configs: _taskConfigs,
+        dayTasks: _dayTasks,
+      ),
     );
-    if (updated != null && mounted) {
-      setState(() => _taskConfigs = updated);
+    if (result != null && mounted) {
+      setState(() {
+        _taskConfigs = result.configs;
+        _dayTasks    = result.dayTasks;
+        // Update task 1 title in current view immediately
+        _tasks[0].title       = _dayTasks[_viewedDate.weekday] ?? '';
+        _controllers[0].text  = _tasks[0].title;
+      });
       await _saveTaskConfig();
+      await _saveDayTasks();
     }
   }
 
@@ -867,7 +899,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } else if (_viewMode == _ViewMode.monthly) {
       subtitle = DateFormat('MMMM yyyy').format(_monthStart);
     } else {
-      subtitle = DateFormat('EEE, dd. MMMM yyyy').format(_viewedDate);
+      subtitle = '${_weekdayShort[_viewedDate.weekday - 1]}, ${DateFormat('dd. MMMM yyyy').format(_viewedDate)}';
     }
 
     void onLeft() {
@@ -1648,9 +1680,24 @@ class _StundenOctPainter extends CustomPainter {
 // Task Settings Dialog
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings return value
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SettingsResult {
+  final List<TaskConfig>  configs;
+  final Map<int, String>  dayTasks;
+  const _SettingsResult({required this.configs, required this.dayTasks});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings dialog
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _TaskSettingsDialog extends StatefulWidget {
-  final List<TaskConfig> configs;
-  const _TaskSettingsDialog({required this.configs});
+  final List<TaskConfig>  configs;
+  final Map<int, String>  dayTasks;
+  const _TaskSettingsDialog({required this.configs, required this.dayTasks});
 
   @override
   State<_TaskSettingsDialog> createState() => _TaskSettingsDialogState();
@@ -1658,11 +1705,17 @@ class _TaskSettingsDialog extends StatefulWidget {
 
 class _TaskSettingsDialogState extends State<_TaskSettingsDialog> {
   late List<TaskConfig> _configs;
+  late Map<int, TextEditingController> _dayControllers;
+
+  static const List<String> _weekdayNames = [
+    'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag',
+    'Freitag', 'Samstag', 'Sonntag',
+  ];
 
   @override
   void initState() {
     super.initState();
-    // deep copy so changes can be cancelled
+    // deep copy configs so changes can be cancelled
     _configs = widget.configs
         .map((c) => TaskConfig(
               isEditable: c.isEditable,
@@ -1670,23 +1723,43 @@ class _TaskSettingsDialogState extends State<_TaskSettingsDialog> {
               isRequired: c.isRequired,
             ))
         .toList();
+    // one controller per weekday (1–7)
+    _dayControllers = {
+      for (int wd = 1; wd <= 7; wd++)
+        wd: TextEditingController(text: widget.dayTasks[wd] ?? ''),
+    };
+  }
+
+  @override
+  void dispose() {
+    for (final c in _dayControllers.values) c.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return AlertDialog(
-      title: const Text('Aufgaben-Einstellungen'),
+      title: const Text('Einstellungen'),
       contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       content: SizedBox(
         width: double.maxFinite,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Header row
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Row(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Section: Task config ───────────────────────────────
+              Text(
+                'Aufgaben-Konfiguration',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: theme.colorScheme.primary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 6),
+              // Header row
+              Row(
                 children: [
                   const Expanded(child: SizedBox()),
                   _HeaderLabel('Bearbeit-\nbar'),
@@ -1694,45 +1767,73 @@ class _TaskSettingsDialogState extends State<_TaskSettingsDialog> {
                   _HeaderLabel('Pflicht'),
                 ],
               ),
-            ),
-            const Divider(height: 1),
-            ...List.generate(_configs.length, (i) {
-              final cfg = _configs[i];
-              return Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Aufgabe ${i + 1}',
-                            style: theme.textTheme.bodyMedium,
+              const Divider(height: 1),
+              ...List.generate(_configs.length, (i) {
+                final cfg = _configs[i];
+                return Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Aufgabe ${i + 1}',
+                              style: theme.textTheme.bodyMedium,
+                            ),
                           ),
-                        ),
-                        _ConfigCheckbox(
-                          value: cfg.isEditable,
-                          onChanged: (v) =>
-                              setState(() => cfg.isEditable = v ?? false),
-                        ),
-                        _ConfigCheckbox(
-                          value: cfg.isRepeating,
-                          onChanged: (v) =>
-                              setState(() => cfg.isRepeating = v ?? false),
-                        ),
-                        _ConfigCheckbox(
-                          value: cfg.isRequired,
-                          onChanged: (v) =>
-                              setState(() => cfg.isRequired = v ?? false),
-                        ),
-                      ],
+                          _ConfigCheckbox(
+                            value: cfg.isEditable,
+                            onChanged: (v) =>
+                                setState(() => cfg.isEditable = v ?? false),
+                          ),
+                          _ConfigCheckbox(
+                            value: cfg.isRepeating,
+                            onChanged: (v) =>
+                                setState(() => cfg.isRepeating = v ?? false),
+                          ),
+                          _ConfigCheckbox(
+                            value: cfg.isRequired,
+                            onChanged: (v) =>
+                                setState(() => cfg.isRequired = v ?? false),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (i < _configs.length - 1) const Divider(height: 1),
+                  ],
+                );
+              }),
+
+              // ── Section: Recurring task 1 per weekday ─────────────
+              const SizedBox(height: 16),
+              Text(
+                'Wiederkehrende Aufgabe (Aufgabe 1)',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: theme.colorScheme.primary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              ...List.generate(7, (i) {
+                final wd = i + 1;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: TextField(
+                    controller: _dayControllers[wd],
+                    decoration: InputDecoration(
+                      labelText: _weekdayNames[i],
+                      isDense: true,
+                      border: const OutlineInputBorder(),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 8),
                     ),
                   ),
-                  if (i < _configs.length - 1) const Divider(height: 1),
-                ],
-              );
-            }),
-          ],
+                );
+              }),
+              const SizedBox(height: 4),
+            ],
+          ),
         ),
       ),
       actions: [
@@ -1741,7 +1842,15 @@ class _TaskSettingsDialogState extends State<_TaskSettingsDialog> {
           child: const Text('Abbrechen'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(_configs),
+          onPressed: () {
+            final dayTasks = {
+              for (int wd = 1; wd <= 7; wd++)
+                wd: _dayControllers[wd]!.text.trim(),
+            };
+            Navigator.of(context).pop(
+              _SettingsResult(configs: _configs, dayTasks: dayTasks),
+            );
+          },
           child: const Text('Speichern'),
         ),
       ],
