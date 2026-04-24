@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:intl/intl.dart';
@@ -57,6 +58,12 @@ class TaskConfig {
       ];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// View mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum _ViewMode { daily, weekly, monthly }
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -86,13 +93,19 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   // ── View state ────────────────────────────────────────────────────────────
-  bool _isWeeklyView = false;
+  _ViewMode _viewMode = _ViewMode.daily;
   late DateTime _viewedDate;  // date shown in daily view
   late DateTime _weekStart;   // Monday of the displayed week
+  late DateTime _monthStart;  // 1st of the displayed month
 
   /// Lightweight cache used by the weekly view: dateKey → task title previews.
-  Map<String, List<String>> _weekCache = {};
+  Map<String, List<String>> _weekCache    = {};
+  Map<String, int>           _weekDoneCache = {};
   bool _weekCacheLoading = false;
+
+  /// Cache for the monthly view: dateKey → number of completed tasks (0–5).
+  Map<String, int> _monthCache = {};
+  bool _monthCacheLoading = false;
 
   // ── Daily task state ──────────────────────────────────────────────────────
   List<TodoItem> _tasks = [];
@@ -101,6 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ── Counter ───────────────────────────────────────────────────────────────
   int _counter = 0;
+  static const String _counterKey = 'stunden_counter';
 
   // ── Autocomplete history ──────────────────────────────────────────────
   List<String> _taskHistory = [];
@@ -117,12 +131,14 @@ class _HomeScreenState extends State<HomeScreen> {
     final today = _dateOnly(DateTime.now());
     _viewedDate = today;
     _weekStart  = _mondayOf(today);
+    _monthStart = DateTime(today.year, today.month, 1);
     _initTasksForDate(today);
     _loadTasksForDate(today);
     _maybeDoWeeklyReset();
     _maybeDoAccountabilityCheck();
     _loadTaskHistory();
     _loadTaskConfig();
+    _loadCounter();
   }
 
   @override
@@ -195,6 +211,17 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _loadCounter() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() => _counter = prefs.getInt(_counterKey) ?? 0);
+  }
+
+  Future<void> _saveCounter() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_counterKey, _counter);
+  }
+
   Future<void> _saveToHistory(String title) async {
     final t = title.trim();
     if (t.isEmpty) return;
@@ -207,17 +234,25 @@ class _HomeScreenState extends State<HomeScreen> {
 
   static const String _usageKey = 'task_usage_map';
 
-  Future<void> _recordTaskUsage(String title) async {
+  Future<void> _recordTaskUsage(String title, DateTime date) async {
     final t = title.trim();
     if (t.isEmpty) return;
+    final yearSuffix  = '_${date.year}';
+    final monthSuffix = '_${date.year}_${date.month.toString().padLeft(2, '0')}';
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_usageKey) ?? '{}';
-    final map = Map<String, int>.from(
-      (jsonDecode(raw) as Map<String, dynamic>)
-          .map((k, v) => MapEntry(k, v as int)),
-    );
-    map[t] = (map[t] ?? 0) + 1;
-    await prefs.setString(_usageKey, jsonEncode(map));
+    for (final mapKey in [
+      _usageKey,
+      '$_usageKey$yearSuffix',
+      '$_usageKey$monthSuffix',
+    ]) {
+      final raw = prefs.getString(mapKey) ?? '{}';
+      final map = Map<String, int>.from(
+        (jsonDecode(raw) as Map<String, dynamic>)
+            .map((k, v) => MapEntry(k, v as int)),
+      );
+      map[t] = (map[t] ?? 0) + 1;
+      await prefs.setString(mapKey, jsonEncode(map));
+    }
   }
 
   bool get _isToday => _viewedDate == _dateOnly(DateTime.now());
@@ -263,6 +298,12 @@ class _HomeScreenState extends State<HomeScreen> {
     ];
     if (!mounted) return;
     setState(() {
+      // Task 1: use day schedule, but respect an explicit empty (skipped) save
+      final savedTask1 = prefs.getString(_taskKey(1, date));
+      if (savedTask1 != null && savedTask1.isEmpty) {
+        _tasks[0].title = '';
+        _controllers[0].text = '';
+      }
       for (int n = 2; n <= 5; n++) {
         final saved = prefs.getString(_taskKey(n, date));
         final value = (saved != null && saved.isNotEmpty)
@@ -289,7 +330,8 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _viewedDate  = date;
       _weekStart   = _mondayOf(date);
-      _isWeeklyView = false;
+      _monthStart  = DateTime(date.year, date.month, 1);
+      _viewMode    = _ViewMode.daily;
       _initTasksForDate(date);
     });
     _loadTasksForDate(date);
@@ -300,8 +342,45 @@ class _HomeScreenState extends State<HomeScreen> {
   // ── Weekly view ───────────────────────────────────────────────────────────
 
   void _enterWeeklyView() {
-    setState(() => _isWeeklyView = true);
+    setState(() => _viewMode = _ViewMode.weekly);
     _loadWeekCache(_weekStart);
+  }
+
+  void _enterMonthlyView() {
+    final ms = DateTime(_viewedDate.year, _viewedDate.month, 1);
+    setState(() {
+      _viewMode   = _ViewMode.monthly;
+      _monthStart = ms;
+    });
+    _loadMonthCache(ms);
+  }
+
+  void _navigateMonth(int delta) {
+    final ms = DateTime(_monthStart.year, _monthStart.month + delta, 1);
+    setState(() => _monthStart = ms);
+    _loadMonthCache(ms);
+  }
+
+  Future<void> _loadMonthCache(DateTime monthStart) async {
+    if (mounted) setState(() => _monthCacheLoading = true);
+    final prefs = await SharedPreferences.getInstance();
+    final cache = <String, int>{};
+    final daysInMonth =
+        DateTime(monthStart.year, monthStart.month + 1, 0).day;
+    for (int d = 1; d <= daysInMonth; d++) {
+      final date = DateTime(monthStart.year, monthStart.month, d);
+      final key  = DateFormat('yyyy-MM-dd').format(date);
+      int done = 0;
+      for (int n = 1; n <= 5; n++) {
+        if (prefs.getBool(_doneKey(n, date)) == true) done++;
+      }
+      cache[key] = done;
+    }
+    if (!mounted) return;
+    setState(() {
+      _monthCache        = cache;
+      _monthCacheLoading = false;
+    });
   }
 
   void _navigateWeek(int delta) {
@@ -313,7 +392,8 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadWeekCache(DateTime weekStart) async {
     if (mounted) setState(() => _weekCacheLoading = true);
     final prefs = await SharedPreferences.getInstance();
-    final cache = <String, List<String>>{};
+    final cache     = <String, List<String>>{};
+    final doneCache = <String, int>{};
 
     for (int i = 0; i < 7; i++) {
       final date = weekStart.add(Duration(days: i));
@@ -324,11 +404,17 @@ class _HomeScreenState extends State<HomeScreen> {
         if (v.isNotEmpty) titles.add(v);
       }
       cache[key] = titles;
+      int done = 0;
+      for (int n = 1; n <= 5; n++) {
+        if (prefs.getBool(_doneKey(n, date)) == true) done++;
+      }
+      doneCache[key] = done;
     }
 
     if (!mounted) return;
     setState(() {
       _weekCache        = cache;
+      _weekDoneCache    = doneCache;
       _weekCacheLoading = false;
     });
   }
@@ -392,7 +478,6 @@ class _HomeScreenState extends State<HomeScreen> {
           if (text.isNotEmpty) {
             await prefs.setString(_taskKey(taskNumber, date), text);
             _saveToHistory(text);
-            _recordTaskUsage(text);
           }
         }
       }
@@ -463,17 +548,43 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _saveDoneState(int n, DateTime date, bool done) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_doneKey(n, date), done);
-    // Track total completions per task stage — increment when marked done,
-    // decrement when unmarked so the count reflects actual completions.
-    final key = 'stat_total_task$n';
-    final current = prefs.getInt(key) ?? 0;
-    await prefs.setInt(key, done ? current + 1 : (current > 0 ? current - 1 : 0));
   }
 
   Future<void> _saveTaskTitle(int n, DateTime date, String title) async {
-    if (n < 2 || n > 5) return;
+    if (n < 1 || n > 5) return;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_taskKey(n, date), title);
+  }
+
+  Future<void> _clearPastTask(int index) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        icon: const Icon(Icons.not_interested, color: Colors.grey, size: 36),
+        title: const Text('Aufgabe überspringen?'),
+        content: const Text(
+          'Die Aufgabe wird als übersprungen markiert und ihr Inhalt gelöscht.',
+          textAlign: TextAlign.center,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Abbrechen'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Überspringen'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _tasks[index].title  = '';
+      _tasks[index].isDone = false;
+    });
+    await _saveTaskTitle(index + 1, _viewedDate, '');
+    await _saveDoneState(index + 1, _viewedDate, false);
   }
 
   // ── Weekly reward reset ───────────────────────────────────────────────────
@@ -664,18 +775,61 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  void _commitEdit(int index) {
-    final text = _controllers[index].text.trim();
+  Future<void> _commitEdit(int index) async {
+    final text       = _controllers[index].text.trim();
+    final isOptional = !_isTaskRequired(index + 1);
+    final today      = _dateOnly(DateTime.now());
+    final isNonToday = _viewedDate != today;
+
+    // Empty required task on a non-today day → ask whether to skip.
+    if (text.isEmpty && !isOptional && isNonToday) {
+      final skip = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          icon: const Icon(Icons.not_interested, color: Colors.grey, size: 36),
+          title: const Text('Aufgabe leer lassen?'),
+          content: const Text(
+            'Die Aufgabe hat keinen Inhalt.\nMöchtest du sie als übersprungen markieren?',
+            textAlign: TextAlign.center,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Weiter bearbeiten'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Überspringen'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (skip != true) return; // keep editing
+      setState(() {
+        _tasks[index].title  = '';
+        _tasks[index].isDone = false;
+        _editingIndex        = null;
+      });
+      await _saveTaskTitle(index + 1, _viewedDate, '');
+      await _saveDoneState(index + 1, _viewedDate, false);
+      return;
+    }
+
     setState(() {
-      if (text.isNotEmpty) _tasks[index].title = text;
+      if (text.isNotEmpty) {
+        _tasks[index].title = text;
+      } else if (isOptional) {
+        _tasks[index].title  = '';
+        _tasks[index].isDone = false;
+      }
       _editingIndex = null;
     });
     if (text.isNotEmpty) {
       _saveTaskTitle(index + 1, _viewedDate, text);
       _saveToHistory(text);
-      // Track usage for tasks 2-5 only (index 1-4); task 1 is always the
-      // fixed day-of-week entry and should not skew the frequency chart.
-      if (index >= 1) _recordTaskUsage(text);
+    } else if (isOptional) {
+      _saveTaskTitle(index + 1, _viewedDate, '');
     }
   }
 
@@ -689,9 +843,13 @@ class _HomeScreenState extends State<HomeScreen> {
         FocusScope.of(context).unfocus();
       },
       child: Scaffold(
-        backgroundColor: Theme.of(context).colorScheme.surface,
+        backgroundColor: Colors.deepPurple.shade50,
         appBar: _buildAppBar(),
-        body: _isWeeklyView ? _buildWeeklyBody() : _buildDailyBody(),
+        body: _viewMode == _ViewMode.weekly
+            ? _buildWeeklyBody()
+            : _viewMode == _ViewMode.monthly
+                ? _buildMonthlyBody()
+                : _buildDailyBody(),
       ),
     );
   }
@@ -701,35 +859,83 @@ class _HomeScreenState extends State<HomeScreen> {
   AppBar _buildAppBar() {
     final cs = Theme.of(context).colorScheme;
 
-    final subtitle = _isWeeklyView
-        ? '${DateFormat('dd. MMM').format(_weekStart)} – '
-          '${DateFormat('dd. MMM yyyy').format(_weekStart.add(const Duration(days: 6)))}'
-        : DateFormat('EEE, dd. MMMM yyyy').format(_viewedDate);
+    String subtitle;
+    if (_viewMode == _ViewMode.weekly) {
+      subtitle =
+          '${DateFormat('dd. MMM').format(_weekStart)} – '
+          '${DateFormat('dd. MMM yyyy').format(_weekStart.add(const Duration(days: 6)))}';
+    } else if (_viewMode == _ViewMode.monthly) {
+      subtitle = DateFormat('MMMM yyyy').format(_monthStart);
+    } else {
+      subtitle = DateFormat('EEE, dd. MMMM yyyy').format(_viewedDate);
+    }
+
+    void onLeft() {
+      if (_viewMode == _ViewMode.weekly) {
+        _navigateWeek(-1);
+      } else if (_viewMode == _ViewMode.monthly) {
+        _navigateMonth(-1);
+      } else {
+        _switchToDate(_viewedDate.subtract(const Duration(days: 1)));
+      }
+    }
+
+    void onRight() {
+      if (_viewMode == _ViewMode.weekly) {
+        _navigateWeek(1);
+      } else if (_viewMode == _ViewMode.monthly) {
+        _navigateMonth(1);
+      } else {
+        _switchToDate(_viewedDate.add(const Duration(days: 1)));
+      }
+    }
+
+    String leftTip  = _viewMode == _ViewMode.weekly ? 'Vorherige Woche'
+                    : _viewMode == _ViewMode.monthly ? 'Vorheriger Monat'
+                    : 'Vorheriger Tag';
+    String rightTip = _viewMode == _ViewMode.weekly ? 'Nächste Woche'
+                    : _viewMode == _ViewMode.monthly ? 'Nächster Monat'
+                    : 'Nächster Tag';
+
+    // Always show the 2 modes that are NOT currently active.
+    // Order: Tag < Woche < Monat.
+    final List<({IconData icon, String label, VoidCallback tap})> viewBtns = [
+      if (_viewMode != _ViewMode.daily)
+        (icon: Icons.view_day,            label: 'Tag',   tap: () => _switchToDate(_viewedDate)),
+      if (_viewMode != _ViewMode.weekly)
+        (icon: Icons.calendar_view_week,  label: 'Woche', tap: _enterWeeklyView),
+      if (_viewMode != _ViewMode.monthly)
+        (icon: Icons.calendar_month,      label: 'Monat', tap: _enterMonthlyView),
+    ];
 
     return AppBar(
-      backgroundColor: cs.inversePrimary,
+      backgroundColor: Colors.deepPurple.shade200,
       centerTitle: true,
+      elevation: 0,
+      // ── Leading: two view-mode toggle buttons ──
+      leadingWidth: 92,
+      leading: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: viewBtns.map((b) => _AppBarLabelButton(
+          icon: b.icon,
+          label: b.label,
+          onTap: b.tap,
+        )).toList(),
+      ),
       // ── Title with inline ‹ › navigation ──
       title: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           IconButton(
             icon: const Icon(Icons.chevron_left),
-            tooltip: _isWeeklyView ? 'Vorherige Woche' : 'Vorheriger Tag',
-            onPressed: _isWeeklyView
-                ? () => _navigateWeek(-1)
-                : () => _switchToDate(
-                    _viewedDate.subtract(const Duration(days: 1))),
+            tooltip: leftTip,
+            onPressed: onLeft,
           ),
           Flexible(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  'My Tasks',
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold, fontSize: 16),
-                ),
+                const Text('Aufgaben'),
                 Text(
                   subtitle,
                   style: TextStyle(
@@ -743,37 +949,23 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.chevron_right),
-            tooltip: _isWeeklyView ? 'Nächste Woche' : 'Nächster Tag',
-            onPressed: _isWeeklyView
-                ? () => _navigateWeek(1)
-                : () =>
-                    _switchToDate(_viewedDate.add(const Duration(days: 1))),
+            tooltip: rightTip,
+            onPressed: onRight,
           ),
         ],
       ),
-      // ── Actions: "today" shortcut + view toggle ──
+      // ── Actions: "today" shortcut + settings ──
       actions: [
-        if (!_isToday || _isWeeklyView)
-          IconButton(
-            icon: const Icon(Icons.today, size: 20),
-            tooltip: 'Heute',
-            onPressed: _goToToday,
+        if (_viewMode == _ViewMode.daily && !_isToday)
+          _AppBarLabelButton(
+            icon: Icons.today,
+            label: 'Heute',
+            onTap: _goToToday,
           ),
-        IconButton(
-          icon: Icon(
-            _isWeeklyView ? Icons.view_day : Icons.calendar_view_week,
-            size: 20,
-          ),
-          tooltip:
-              _isWeeklyView ? 'Tagesansicht' : 'Wochenansicht',
-          onPressed: _isWeeklyView
-              ? () => setState(() => _isWeeklyView = false)
-              : _enterWeeklyView,
-        ),
-        IconButton(
-          icon: const Icon(Icons.settings, size: 20),
-          tooltip: 'Einstellungen',
-          onPressed: _openSettings,
+        _AppBarLabelButton(
+          icon: Icons.settings,
+          label: 'Einstellung',
+          onTap: _openSettings,
         ),
       ],
     );
@@ -782,73 +974,105 @@ class _HomeScreenState extends State<HomeScreen> {
   // ── Daily body ────────────────────────────────────────────────────────────
 
   Widget _buildDailyBody() {
-    return ListView.separated(
-      padding:
-          const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       itemCount: _tasks.length + 1,
-      separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (_, index) {
-        if (index < _tasks.length) return _buildTaskTile(index);
-        return _buildCounterTile();
+        if (index < _tasks.length) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Card(
+              elevation: 2,
+              shadowColor: Colors.deepPurple.withOpacity(0.12),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18)),
+              color: Colors.white,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                child: _buildTaskTile(index),
+              ),
+            ),
+          );
+        }
+        return Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: _buildStundenCard(),
+        );
       },
     );
   }
 
-  Widget _buildCounterTile() {
-    final cs = Theme.of(context).colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        children: [
-          const SizedBox(width: 12),
-          Icon(Icons.tag, size: 18, color: cs.primary),
-          const SizedBox(width: 8),
-          const Text(
-            'Zähler',
-            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
-          ),
-          const Spacer(),
-          // Decrement
-          InkWell(
-            onTap: () => setState(() => _counter--),
-            borderRadius: BorderRadius.circular(20),
-            child: Padding(
-              padding: const EdgeInsets.all(6),
-              child: Icon(Icons.remove_circle_outline,
-                  color: cs.primary, size: 26),
-            ),
-          ),
-          const SizedBox(width: 8),
-          // Value
-          SizedBox(
-            width: 40,
-            child: Text(
-              '$_counter',
-              textAlign: TextAlign.center,
+  Widget _buildStundenCard() {
+    final valueColor = _counter < 0
+        ? Colors.red.shade600
+        : _counter == 0
+            ? Colors.grey.shade500
+            : Colors.green.shade600;
+    final octColor = _counter < 0
+        ? Colors.red.shade300
+        : _counter == 0
+            ? Colors.grey.shade300
+            : Colors.green.shade400;
+
+    return Card(
+      elevation: 3,
+      shadowColor: Colors.deepPurple.withOpacity(0.12),
+      shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      color: Colors.white,
+      child: Padding(
+        padding:
+            const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // Label
+            const Text(
+              'Stunden',
               style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: _counter < 0
-                    ? Colors.red.shade400
-                    : _counter == 0
-                        ? Colors.grey
-                        : cs.primary,
-              ),
+                  fontSize: 16, fontWeight: FontWeight.w600),
             ),
-          ),
-          const SizedBox(width: 8),
-          // Increment
-          InkWell(
-            onTap: () => setState(() => _counter++),
-            borderRadius: BorderRadius.circular(20),
-            child: Padding(
-              padding: const EdgeInsets.all(6),
-              child: Icon(Icons.add_circle_outline,
-                  color: cs.primary, size: 26),
+            // Controls + octagon
+            Row(
+              children: [
+                // Decrement
+                _ArrowButton(
+                  icon: Icons.arrow_downward_rounded,
+                  color: Colors.red.shade400,
+                  onTap: () { setState(() => _counter--); _saveCounter(); },
+                ),
+                const SizedBox(width: 12),
+                // Octagonal indicator
+                CustomPaint(
+                  size: const Size(72, 72),
+                  painter: _StundenOctPainter(color: octColor),
+                  child: SizedBox(
+                    width: 72,
+                    height: 72,
+                    child: Center(
+                      child: Text(
+                        '$_counter',
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: valueColor,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Increment
+                _ArrowButton(
+                  icon: Icons.arrow_upward_rounded,
+                  color: Colors.green.shade500,
+                  onTap: () { setState(() => _counter++); _saveCounter(); },
+                ),
+              ],
             ),
-          ),
-          const SizedBox(width: 4),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -858,8 +1082,98 @@ class _HomeScreenState extends State<HomeScreen> {
     final isEditing    = _editingIndex == index;
     final editable     = _isEditable(index);
     final isEmpty      = task.title.isEmpty;
-    final isPastDay      = !_isToday;
-    final checkboxLocked = isPastDay || (index == 0 && _isViewedSunday);
+    final isOptional   = !_isTaskRequired(index + 1);
+    final today        = _dateOnly(DateTime.now());
+    final isFutureDay  = _viewedDate.isAfter(today);
+    final isPastDay    = _viewedDate.isBefore(today);
+    final checkboxLocked = !_isToday || (index == 0 && _isViewedSunday);
+
+    // Future required task with no title — prompt to set it.
+    if (isFutureDay && isEmpty && !isOptional && !isEditing) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: InkWell(
+          onTap: editable ? () => _startEdit(index) : () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Nutze den Wochenplaner (📅), um zukünftige Aufgaben einzutragen.',
+                ),
+              ),
+            );
+          },
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+            child: Row(
+              children: [
+                Icon(Icons.edit_calendar_outlined, size: 18, color: Colors.deepPurple.shade300),
+                const SizedBox(width: 8),
+                Text(
+                  editable ? 'Aufgabe für diesen Tag eintragen...' : 'Noch nicht geplant',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.deepPurple.shade300,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Past required task that was skipped — show skip indicator.
+    if (isPastDay && isEmpty && !isOptional && !isEditing) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            const SizedBox(width: 48), // align with checkbox width
+            Icon(Icons.fast_forward, size: 18, color: Colors.grey.shade400),
+            const SizedBox(width: 8),
+            Text(
+              'Übersprungen',
+              style: TextStyle(
+                fontSize: 15,
+                fontStyle: FontStyle.italic,
+                color: Colors.grey.shade400,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Optional tasks that are empty are not yet "tasks" — show a lightweight
+    // add-placeholder instead of a full tile with a checkbox.
+    if (isOptional && isEmpty && !isEditing) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: InkWell(
+          onTap: editable && !isPastDay ? () => _startEdit(index) : null,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+            child: Row(
+              children: [
+                Icon(Icons.add, size: 18, color: Colors.grey.shade400),
+                const SizedBox(width: 8),
+                Text(
+                  'Optionale Aufgabe hinzufügen...',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey.shade400,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -914,13 +1228,27 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: _openWeeklyPlanner,
             ),
 
-          // Edit icon (tasks 3–5)
+          // Edit icon (editable tasks on all days)
           if (editable && !isEditing)
             IconButton(
-              icon: const Icon(Icons.edit, size: 18),
+              icon: Icon(
+                Icons.edit_outlined,
+                size: 18,
+                color: _isToday
+                    ? Colors.deepPurple.shade300
+                    : Colors.grey.shade500,
+              ),
               tooltip: 'Task bearbeiten',
-              color: Colors.deepPurple.shade300,
               onPressed: () => _startEdit(index),
+            ),
+
+          // Skip/clear button — visible on non-today days when the task has content
+          if (!_isToday && !isEmpty && !isEditing)
+            IconButton(
+              icon: Icon(Icons.not_interested,
+                  size: 18, color: Colors.grey.shade400),
+              tooltip: 'Als übersprungen markieren',
+              onPressed: () => _clearPastTask(index),
             ),
 
           // Confirm edit
@@ -930,6 +1258,125 @@ class _HomeScreenState extends State<HomeScreen> {
               tooltip: 'Speichern',
               color: Colors.green,
               onPressed: () => _commitEdit(index),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ── Completion colour scale ──────────────────────────────────────────────
+  /// Returns a background [Color] for [done] completed tasks,
+  /// or null when done == 0 (caller keeps its own default colour).
+  static Color? _completionColor(int done) {
+    switch (done) {
+      case 1: return Colors.red.shade800;
+      case 2: return Colors.red.shade300;
+      case 3: return Colors.amber.shade400;
+      case 4: return Colors.lightGreen.shade400;
+      case 5: return Colors.green.shade700;
+      default: return null;
+    }
+  }
+
+  // ── Monthly body ──────────────────────────────────────────────────────────
+
+  Widget _buildMonthlyBody() {
+    if (_monthCacheLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final today       = _dateOnly(DateTime.now());
+    final daysInMonth = DateTime(_monthStart.year, _monthStart.month + 1, 0).day;
+    // weekday of the 1st (1=Mon … 7=Sun); offset so grid starts on Monday
+    final firstWeekday = _monthStart.weekday; // 1–7
+    final leadingEmpty = firstWeekday - 1;    // cells before day 1
+    final totalCells   = leadingEmpty + daysInMonth;
+    final rowCount     = (totalCells / 7).ceil();
+    final cs           = Theme.of(context).colorScheme;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 32),
+      child: Column(
+        children: [
+          // ── Weekday header ──────────────────────────────────────────
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(
+              children: _weekdayShort.map((label) => Expanded(
+                child: Center(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              )).toList(),
+            ),
+          ),
+          // ── Calendar grid ───────────────────────────────────────────
+          for (int row = 0; row < rowCount; row++)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: List.generate(7, (col) {
+                final cellIndex = row * 7 + col;
+                final dayNum    = cellIndex - leadingEmpty + 1;
+                if (dayNum < 1 || dayNum > daysInMonth) {
+                  // Empty cell
+                  return const Expanded(child: SizedBox(height: 72));
+                }
+                final date    = DateTime(_monthStart.year, _monthStart.month, dayNum);
+                final dateKey = DateFormat('yyyy-MM-dd').format(date);
+                final done    = _monthCache[dateKey] ?? 0;
+                final isToday  = date == today;
+                final isViewed = date == _viewedDate;
+                final compColor = _completionColor(done);
+                final bgColor = compColor
+                    ?? (isToday
+                        ? Colors.deepPurple.shade600
+                        : isViewed
+                            ? Colors.deepPurple.shade100
+                            : Colors.white);
+                // Text is white on dark backgrounds, dark otherwise.
+                final textColor = (compColor != null || isToday)
+                    ? Colors.white
+                    : cs.onSurface;
+
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () => _switchToDate(date),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      margin: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        color: bgColor,
+                        borderRadius: BorderRadius.circular(14),
+                        boxShadow: [
+                          BoxShadow(
+                            color: (compColor ?? Colors.deepPurple)
+                                .withOpacity(isToday ? 0.30 : 0.12),
+                            blurRadius: isToday ? 8 : 4,
+                            offset: const Offset(0, 3),
+                          ),
+                        ],
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 8, horizontal: 4),
+                      child: Text(
+                        '$dayNum',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: textColor,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }),
             ),
         ],
       ),
@@ -947,23 +1394,29 @@ class _HomeScreenState extends State<HomeScreen> {
     final cs    = Theme.of(context).colorScheme;
 
     return ListView.builder(
-      padding:
-          const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
       itemCount: 7,
       itemBuilder: (_, i) {
         final date    = _weekStart.add(Duration(days: i));
         final dateKey = DateFormat('yyyy-MM-dd').format(date);
-        final tasks   = _weekCache[dateKey] ?? [_dayTasks[date.weekday] ?? ''];
+        final tasks     = _weekCache[dateKey] ?? [_dayTasks[date.weekday] ?? ''];
+        final done      = _weekDoneCache[dateKey] ?? 0;
         final isToday   = date == today;
         final isViewed  = date == _viewedDate;
+        final compColor = _completionColor(done);
+        final cardColor = compColor
+            ?? (isToday
+                ? cs.primaryContainer
+                : isViewed
+                    ? cs.secondaryContainer
+                    : Colors.white);
 
         return Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          color: isToday
-              ? cs.primaryContainer
-              : isViewed
-                  ? cs.secondaryContainer
-                  : null,
+          margin: const EdgeInsets.only(bottom: 10),
+          elevation: 2,
+          shadowColor: (compColor ?? Colors.deepPurple).withOpacity(0.15),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          color: cardColor,
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
             onTap: () => _switchToDate(date),
@@ -1054,6 +1507,141 @@ class _HomeScreenState extends State<HomeScreen> {
       },
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AppBar action button with icon + small label beneath it
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _AppBarLabelButton extends StatelessWidget {
+  const _AppBarLabelButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 20),
+            const SizedBox(height: 1),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Arrow button for Stunden counter
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ArrowButton extends StatelessWidget {
+  const _ArrowButton({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: color.withOpacity(0.12),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Icon(icon, size: 24, color: color),
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Octagon painter for Stunden indicator
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _StundenOctPainter extends CustomPainter {
+  const _StundenOctPainter({required this.color});
+  final Color color;
+
+  static const int _sides = 8;
+  static const double _cornerRadius = 5.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final r = size.width * 0.46;
+
+    final vertices = List.generate(_sides, (i) {
+      final angle = (i * 360 / _sides + 22.5) * math.pi / 180;
+      return Offset(cx + r * math.cos(angle), cy + r * math.sin(angle));
+    });
+
+    Offset norm(Offset v) {
+      final d = v.distance;
+      return d == 0 ? Offset.zero : Offset(v.dx / d, v.dy / d);
+    }
+
+    final starts = <Offset>[];
+    final ends = <Offset>[];
+    for (int i = 0; i < _sides; i++) {
+      final a = vertices[i];
+      final b = vertices[(i + 1) % _sides];
+      final dir = norm(b - a);
+      starts.add(a + dir * _cornerRadius);
+      ends.add(b - dir * _cornerRadius);
+    }
+
+    final path = Path()..moveTo(starts[0].dx, starts[0].dy);
+    for (int i = 0; i < _sides; i++) {
+      path.lineTo(ends[i].dx, ends[i].dy);
+      final v = vertices[(i + 1) % _sides];
+      final s = starts[(i + 1) % _sides];
+      path.quadraticBezierTo(v.dx, v.dy, s.dx, s.dy);
+    }
+    path.close();
+
+    canvas.drawShadow(path, Colors.black26, 3, false);
+
+    // Filled background
+    canvas.drawPath(path, Paint()..color = color.withOpacity(0.18));
+
+    // Stroke border
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_StundenOctPainter old) => old.color != color;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

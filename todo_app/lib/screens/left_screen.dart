@@ -1,6 +1,33 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Period filter
+// ───────────────────────────────────────────────────────────────────────────────
+
+enum _Period { lifetime, year, month }
+
+extension _PeriodX on _Period {
+  String get keySuffix {
+    final now = DateTime.now();
+    switch (this) {
+      case _Period.lifetime:
+        return '';
+      case _Period.year:
+        return '_${now.year}';
+      case _Period.month:
+        return '_${now.year}_${now.month.toString().padLeft(2, '0')}';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case _Period.lifetime: return 'Gesamt';
+      case _Period.year:     return 'Dieses Jahr';
+      case _Period.month:    return 'Dieser Monat';
+    }
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Stats model
@@ -19,30 +46,93 @@ class _Stats {
     required this.topTasks,
   });
 
-  static Future<_Stats> load() async {
+  /// Derives all stats by scanning the raw `done{n}_{date}` and
+  /// `task{n}_{date}` keys in SharedPreferences.  This means every change
+  /// to past/future tasks is immediately reflected without any separate
+  /// counter bookkeeping.
+  static Future<_Stats> load(_Period period) async {
     final prefs = await SharedPreferences.getInstance();
+    final now   = DateTime.now();
 
-    // Parse usage-frequency map written by home_screen._recordTaskUsage.
-    final raw = prefs.getString('task_usage_map') ?? '{}';
-    Map<String, int> usageMap = {};
-    try {
-      usageMap = Map<String, int>.from(
-        (jsonDecode(raw) as Map<String, dynamic>)
-            .map((k, v) => MapEntry(k, (v as num).toInt())),
-      );
-    } catch (_) {}
+    // ── Determine the date window for the selected period ──────────────────
+    DateTime? windowStart; // null = no lower bound (lifetime)
+    DateTime? windowEnd;   // null = no upper bound (lifetime)
+    if (period == _Period.year) {
+      windowStart = DateTime(now.year, 1, 1);
+      windowEnd   = DateTime(now.year, 12, 31);
+    } else if (period == _Period.month) {
+      windowStart = DateTime(now.year, now.month, 1);
+      windowEnd   = DateTime(now.year, now.month + 1, 0); // last day of month
+    }
+
+    bool _inWindow(DateTime d) {
+      if (windowStart != null && d.isBefore(windowStart)) return false;
+      if (windowEnd   != null && d.isAfter(windowEnd))   return false;
+      return true;
+    }
+
+    // ── Scan all keys once ─────────────────────────────────────────────────
+    final taskTotals = List<int>.filled(5, 0);
+    final usageMap   = <String, int>{};
+
+    final allKeys = prefs.getKeys();
+    // done keys look like:  done{n}_{yyyy-MM-dd}
+    final donePattern = RegExp(r'^done(\d+)_(\d{4}-\d{2}-\d{2})$');
+    // task title keys:      task{n}_{yyyy-MM-dd}
+    final taskPattern = RegExp(r'^task(\d+)_(\d{4}-\d{2}-\d{2})$');
+
+    // Build a map of dateKey → {n → title} for completed tasks so we can
+    // populate the top-tasks chart without a second prefs pass.
+    final completedTitles = <String, Map<int, String>>{};
+
+    for (final key in allKeys) {
+      final m = donePattern.firstMatch(key);
+      if (m == null) continue;
+      if (prefs.getBool(key) != true) continue;
+
+      final n    = int.tryParse(m.group(1)!) ?? 0;
+      final date = DateTime.tryParse(m.group(2)!);
+      if (date == null || n < 1 || n > 5) continue;
+      if (!_inWindow(date)) continue;
+
+      taskTotals[n - 1]++;
+
+      // Only tasks 2-5 have free-text titles tracked in the top-tasks chart.
+      if (n >= 2) {
+        final dateKey = m.group(2)!;
+        completedTitles.putIfAbsent(dateKey, () => {})[n] = '';
+      }
+    }
+
+    // Fill in titles for completed task slots.
+    for (final key in allKeys) {
+      final m = taskPattern.firstMatch(key);
+      if (m == null) continue;
+      final n       = int.tryParse(m.group(1)!) ?? 0;
+      final dateKey = m.group(2)!;
+      if (!completedTitles.containsKey(dateKey)) continue;
+      if (!completedTitles[dateKey]!.containsKey(n)) continue;
+      final title = prefs.getString(key)?.trim() ?? '';
+      if (title.isNotEmpty) completedTitles[dateKey]![n] = title;
+    }
+
+    // Tally titles into the usage map.
+    for (final dayMap in completedTitles.values) {
+      for (final title in dayMap.values) {
+        if (title.isNotEmpty) usageMap[title] = (usageMap[title] ?? 0) + 1;
+      }
+    }
+
     final sorted = usageMap.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
     final top5 = sorted.take(5).toList();
 
     return _Stats(
+      // Streak is always lifetime — not period-specific.
       streakCurrent: prefs.getInt('stat_streak_current') ?? 0,
-      streakBest: prefs.getInt('stat_streak_best') ?? 0,
-      taskTotals: List.generate(
-        5,
-        (i) => prefs.getInt('stat_total_task${i + 1}') ?? 0,
-      ),
-      topTasks: top5,
+      streakBest:    prefs.getInt('stat_streak_best')    ?? 0,
+      taskTotals:    taskTotals,
+      topTasks:      top5,
     );
   }
 }
@@ -62,6 +152,7 @@ class LeftScreen extends StatefulWidget {
 class _LeftScreenState extends State<LeftScreen> {
   _Stats? _stats;
   bool _loading = true;
+  _Period _period = _Period.lifetime;
 
   @override
   void initState() {
@@ -71,8 +162,49 @@ class _LeftScreenState extends State<LeftScreen> {
 
   Future<void> _load() async {
     setState(() => _loading = true);
-    final stats = await _Stats.load();
+    final stats = await _Stats.load(_period);
     if (mounted) setState(() { _stats = stats; _loading = false; });
+  }
+
+  Future<void> _resetStats() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        icon: const Icon(Icons.delete_forever, color: Colors.red, size: 36),
+        title: const Text('Statistiken zurücksetzen?'),
+        content: const Text(
+          'Alle erledigten Aufgaben und der Streak werden gelöscht. '
+          'Dieser Vorgang kann nicht rückgängig gemacht werden.',
+          textAlign: TextAlign.center,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Abbrechen'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Zurücksetzen'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    // Remove all done keys (done{n}_{date}) and streak counters.
+    final toRemove = prefs.getKeys()
+        .where((k) => RegExp(r'^done\d+_\d{4}-\d{2}-\d{2}$').hasMatch(k) ||
+                      k.startsWith('stat_streak') ||
+                      k.startsWith('stat_total_task') ||
+                      k.startsWith('task_usage_map') ||
+                      k == 'debug_seeded')
+        .toList();
+    for (final k in toRemove) {
+      await prefs.remove(k);
+    }
+    _load();
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -85,11 +217,17 @@ class _LeftScreenState extends State<LeftScreen> {
         title: const Text('Statistiken'),
         centerTitle: true,
         backgroundColor: Colors.indigo.shade200,
+        elevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Aktualisieren',
             onPressed: _load,
+          ),
+          IconButton(
+            icon: const Icon(Icons.delete_forever),
+            tooltip: 'Statistiken zurücksetzen',
+            onPressed: _resetStats,
           ),
         ],
       ),
@@ -98,8 +236,10 @@ class _LeftScreenState extends State<LeftScreen> {
           : RefreshIndicator(
               onRefresh: _load,
               child: ListView(
-                padding: const EdgeInsets.all(20),
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
                 children: [
+                  _buildPeriodToggle(),
+                  const SizedBox(height: 16),
                   _buildStreakCard(),
                   const SizedBox(height: 20),
                   _buildTaskTotalsCard(),
@@ -108,6 +248,60 @@ class _LeftScreenState extends State<LeftScreen> {
                 ],
               ),
             ),
+    );
+  }
+
+  // ── Period toggle ─────────────────────────────────────────────────────────
+
+  Widget _buildPeriodToggle() {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+        child: Row(
+          children: _Period.values.map((p) {
+            final selected = p == _period;
+            return Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 3),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? Colors.indigo.shade400
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: InkWell(
+                    onTap: () {
+                      if (_period == p) return;
+                      setState(() => _period = p);
+                      _load();
+                    },
+                    borderRadius: BorderRadius.circular(10),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 8, horizontal: 4),
+                      child: Text(
+                        p.label,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: selected
+                              ? Colors.white
+                              : Colors.indigo.shade400,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
     );
   }
 
@@ -184,10 +378,10 @@ class _LeftScreenState extends State<LeftScreen> {
     final total = s.taskTotals.fold(0, (a, b) => a + b);
 
     const labels = [
-      'Tagesaufgabe',
-      'Hauptaufgabe',
-      'Tagesreport',
-      'Task-Board',
+      'Default Task',
+      'Wochen Task',
+      'Tages Task',
+      'Haushalts Task',
       'Bonusaufgabe',
     ];
     const icons = [
@@ -224,7 +418,7 @@ class _LeftScreenState extends State<LeftScreen> {
                 ),
                 const Spacer(),
                 Text(
-                  'Gesamt: $total',
+                  'Gesamt (${ _period.label}): $total',
                   style: TextStyle(
                       fontSize: 12, color: Colors.grey.shade600),
                 ),
@@ -269,6 +463,11 @@ class _LeftScreenState extends State<LeftScreen> {
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
               ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _period.label,
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
             ),
             const SizedBox(height: 14),
             if (top.isEmpty)

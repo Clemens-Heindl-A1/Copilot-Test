@@ -36,9 +36,9 @@ class _RightScreenState extends State<RightScreen> {
   static final List<_Reward> _catalog = [
     _Reward(key: 'gaming',    label: 'Gaming',       icon: Icons.sports_esports),
     _Reward(key: 'youtube',   label: 'YouTube',      icon: Icons.smart_display),
-    _Reward(key: 'cinema',    label: 'Kino-Abend',   icon: Icons.movie_creation),
-    _Reward(key: 'cake',      label: 'Kuchen',       icon: Icons.cake),
-    _Reward(key: 'mystery',   label: 'Überraschung', icon: Icons.help_outline),
+    _Reward(key: 'cinema',    label: 'Film',         icon: Icons.movie_creation),
+    _Reward(key: 'cake',      label: 'Süßigkeiten',  icon: Icons.cake),
+    _Reward(key: 'mystery',   label: 'Joker',        icon: Icons.help_outline),
     _Reward(key: 'skip',      label: 'Skip',         icon: Icons.fast_forward),
   ];
 
@@ -129,6 +129,7 @@ class _RightScreenState extends State<RightScreen> {
         title: const Text('Belohnungen'),
         centerTitle: true,
         backgroundColor: Colors.teal.shade200,
+        elevation: 0,
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -138,15 +139,15 @@ class _RightScreenState extends State<RightScreen> {
 
   Widget _buildGrid() {
     return GridView.builder(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 2,
-        mainAxisSpacing: 20,
-        crossAxisSpacing: 20,
-        childAspectRatio: 0.9,
+        mainAxisSpacing: 16,
+        crossAxisSpacing: 16,
+        childAspectRatio: 0.88,
       ),
       itemCount: _catalog.length,
-      itemBuilder: (_, i) => _HexRewardCard(
+      itemBuilder: (_, i) => _OctRewardCard(
         reward: _catalog[i],
         onTap: () => _onTap(_catalog[i]),
       ),
@@ -155,11 +156,11 @@ class _RightScreenState extends State<RightScreen> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hexagon reward card
+// Octagon reward card
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _HexRewardCard extends StatelessWidget {
-  const _HexRewardCard({required this.reward, required this.onTap});
+class _OctRewardCard extends StatelessWidget {
+  const _OctRewardCard({required this.reward, required this.onTap});
 
   final _Reward reward;
   final VoidCallback onTap;
@@ -167,107 +168,136 @@ class _HexRewardCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final empty = reward.count <= 0;
-    final color = empty ? Colors.grey.shade300 : Colors.teal.shade400;
-    final textColor = empty ? Colors.grey.shade500 : Colors.teal.shade800;
+    final fillColor  = empty ? Colors.grey.shade300  : Colors.teal.shade400;
+    final cardColor  = empty ? Colors.grey.shade50   : Colors.teal.shade50;
+    final textColor  = empty ? Colors.grey.shade500  : Colors.teal.shade800;
+    final badgeBg    = empty ? Colors.grey.shade200  : Colors.teal.shade100;
+    final badgeBorder= empty ? Colors.grey.shade400  : Colors.teal.shade300;
 
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          // Hexagon
-          CustomPaint(
-            size: const Size(96, 96),
-            painter: _HexPainter(color: color),
-            child: SizedBox(
-              width: 96,
-              height: 96,
-              child: Center(
-                child: Icon(
-                  reward.icon,
-                  size: 38,
-                  color: empty ? Colors.grey.shade400 : Colors.white,
+    return Card(
+      elevation: empty ? 1 : 4,
+      shadowColor: empty ? Colors.transparent : Colors.teal.withOpacity(0.25),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(22),
+      ),
+      color: cardColor,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(22),
+        splashColor: Colors.teal.withOpacity(0.15),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // Octagon shape
+              CustomPaint(
+                size: const Size(88, 88),
+                painter: _OctPainter(color: fillColor),
+                child: SizedBox(
+                  width: 88,
+                  height: 88,
+                  child: Center(
+                    child: Icon(
+                      reward.icon,
+                      size: 36,
+                      color: empty ? Colors.grey.shade400 : Colors.white,
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
-          const SizedBox(height: 10),
-          // Label
-          Text(
-            reward.label,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
-              color: textColor,
-            ),
-          ),
-          const SizedBox(height: 4),
-          // Count badge
-          Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-            decoration: BoxDecoration(
-              color: empty
-                  ? Colors.grey.shade200
-                  : Colors.teal.shade100,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: empty
-                    ? Colors.grey.shade400
-                    : Colors.teal.shade300,
+              const SizedBox(height: 10),
+              // Label
+              Text(
+                reward.label,
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                  color: textColor,
+                ),
               ),
-            ),
-            child: Text(
-              'x${reward.count}',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-                color: textColor,
+              const SizedBox(height: 6),
+              // Count badge
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+                decoration: BoxDecoration(
+                  color: badgeBg,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: badgeBorder),
+                ),
+                child: Text(
+                  'x${reward.count}',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: textColor,
+                  ),
+                ),
               ),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Hexagon painter
+// Octagon painter (8-sided with rounded corners)
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _HexPainter extends CustomPainter {
-  const _HexPainter({required this.color});
+class _OctPainter extends CustomPainter {
+  const _OctPainter({required this.color});
   final Color color;
+
+  static const int _sides = 8;
+  static const double _cornerRadius = 7.0;
 
   @override
   void paint(Canvas canvas, Size size) {
     final cx = size.width / 2;
     final cy = size.height / 2;
-    final r  = size.width / 2;
+    final r  = size.width * 0.46;
 
-    final path = Path();
-    for (int i = 0; i < 6; i++) {
-      // Pointy-top hexagon
-      final angle = (i * 60 - 30) * (math.pi / 180);
-      final x = cx + r * math.cos(angle);
-      final y = cy + r * math.sin(angle);
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
+    // Flat-top octagon: first vertex at 22.5° so a flat edge sits at the top
+    final vertices = List.generate(_sides, (i) {
+      final angle = (i * 360 / _sides + 22.5) * math.pi / 180;
+      return Offset(cx + r * math.cos(angle), cy + r * math.sin(angle));
+    });
+
+    Offset _norm(Offset v) {
+      final d = v.distance;
+      return d == 0 ? Offset.zero : Offset(v.dx / d, v.dy / d);
+    }
+
+    // For each edge, compute start/end points inset by _cornerRadius
+    final starts = <Offset>[];
+    final ends   = <Offset>[];
+    for (int i = 0; i < _sides; i++) {
+      final a   = vertices[i];
+      final b   = vertices[(i + 1) % _sides];
+      final dir = _norm(b - a);
+      starts.add(a + dir * _cornerRadius);
+      ends.add(b - dir * _cornerRadius);
+    }
+
+    final path = Path()..moveTo(starts[0].dx, starts[0].dy);
+    for (int i = 0; i < _sides; i++) {
+      path.lineTo(ends[i].dx, ends[i].dy);
+      final v = vertices[(i + 1) % _sides];
+      final s = starts[(i + 1) % _sides];
+      path.quadraticBezierTo(v.dx, v.dy, s.dx, s.dy);
     }
     path.close();
 
-    // Shadow
-    canvas.drawShadow(path, Colors.black26, 4, false);
+    // Subtle shadow
+    canvas.drawShadow(path, Colors.black38, 5, false);
 
     // Fill
     canvas.drawPath(path, Paint()..color = color);
   }
 
   @override
-  bool shouldRepaint(_HexPainter old) => old.color != color;
+  bool shouldRepaint(_OctPainter old) => old.color != color;
 }
