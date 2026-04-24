@@ -231,7 +231,7 @@ class _LeftScreenState extends State<LeftScreen> {
           ),
         ],
       ),
-      body: _loading
+      body: _loading || _stats == null
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
               onRefresh: _load,

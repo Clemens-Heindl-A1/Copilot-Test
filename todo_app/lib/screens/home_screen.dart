@@ -136,11 +136,13 @@ class _HomeScreenState extends State<HomeScreen> {
     _weekStart  = _mondayOf(today);
     _monthStart = DateTime(today.year, today.month, 1);
     _initTasksForDate(today);
-    _loadDayTasks().then((_) => _loadTasksForDate(today));
+    // Wait for both day-tasks and task-config before loading task titles
+    // so _isTaskRepeating() and _dayTasks are up-to-date.
+    Future.wait([_loadDayTasks(), _loadTaskConfig()])
+        .then((_) => _loadTasksForDate(today));
     _maybeDoWeeklyReset();
     _maybeDoAccountabilityCheck();
     _loadTaskHistory();
-    _loadTaskConfig();
     _loadCounter();
   }
 
@@ -234,12 +236,14 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() {
         _taskConfigs = result.configs;
         _dayTasks    = result.dayTasks;
-        // Update task 1 title in current view immediately
-        _tasks[0].title       = _dayTasks[_viewedDate.weekday] ?? '';
-        _controllers[0].text  = _tasks[0].title;
       });
       await _saveTaskConfig();
       await _saveDayTasks();
+      // Reload tasks so task-1 title and repeating defaults are refreshed.
+      if (mounted) await _loadTasksForDate(_viewedDate);
+      // Invalidate cached views.
+      if (_viewMode == _ViewMode.weekly)  _loadWeekCache(_weekStart);
+      if (_viewMode == _ViewMode.monthly) _loadMonthCache(_monthStart);
     }
   }
 
@@ -430,7 +434,12 @@ class _HomeScreenState extends State<HomeScreen> {
     for (int i = 0; i < 7; i++) {
       final date = weekStart.add(Duration(days: i));
       final key  = DateFormat('yyyy-MM-dd').format(date);
-      final titles = <String>[_dayTasks[date.weekday] ?? ''];
+      // Task 1: respect explicit saved value (e.g. skipped = empty string)
+      final savedTask1 = prefs.getString(_taskKey(1, date));
+      final task1Title = (savedTask1 != null)
+          ? savedTask1  // empty string means explicitly skipped
+          : (_dayTasks[date.weekday] ?? '');
+      final titles = <String>[task1Title];
       for (int n = 2; n <= 5; n++) {
         final v = prefs.getString(_taskKey(n, date)) ?? '';
         if (v.isNotEmpty) titles.add(v);
@@ -460,7 +469,8 @@ class _HomeScreenState extends State<HomeScreen> {
         requiredRepeating.add(n);
       }
     }
-    if (requiredRepeating.isEmpty) return false;
+    // No repeating required tasks configured → the planner is always "done".
+    if (requiredRepeating.isEmpty) return true;
 
     final nextMonday = sunday.add(Duration(days: 8 - sunday.weekday));
     for (int i = 0; i < 7; i++) {
@@ -548,11 +558,22 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _toggleDone(int index) {
-    if (!_isToday) {
+    final today = _dateOnly(DateTime.now());
+    if (_viewedDate.isBefore(today)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
             'Vergangene Tage können nicht mehr geändert werden.',
+          ),
+        ),
+      );
+      return;
+    }
+    if (_viewedDate.isAfter(today)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Zukünftige Aufgaben können noch nicht erledigt werden.',
           ),
         ),
       );
@@ -860,6 +881,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (text.isNotEmpty) {
       _saveTaskTitle(index + 1, _viewedDate, text);
       _saveToHistory(text);
+      _recordTaskUsage(text, _viewedDate);
     } else if (isOptional) {
       _saveTaskTitle(index + 1, _viewedDate, '');
     }
@@ -2244,10 +2266,17 @@ class _AutocompleteFieldState extends State<_AutocompleteField> {
       },
       fieldViewBuilder: (context, fieldController, focusNode, onEditingComplete) {
         // Keep our external controller in sync.
-        fieldController.text = widget.controller.text;
-        fieldController.addListener(() {
-          widget.controller.text = fieldController.text;
-        });
+        // Only set text if it differs to avoid cursor-jump feedback loops.
+        if (fieldController.text != widget.controller.text) {
+          fieldController.text = widget.controller.text;
+        }
+        // Sync back: use a one-time setup via the controller's listener list
+        // length to avoid adding duplicate listeners across rebuilds.
+        if (!fieldController.hasListeners) {
+          fieldController.addListener(() {
+            widget.controller.text = fieldController.text;
+          });
+        }
         return TextField(
           controller: fieldController,
           focusNode: focusNode,
