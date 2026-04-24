@@ -139,12 +139,12 @@ class _RightScreenState extends State<RightScreen> {
 
   Widget _buildGrid() {
     return GridView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 120),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 2,
         mainAxisSpacing: 16,
         crossAxisSpacing: 16,
-        childAspectRatio: 0.88,
+        childAspectRatio: 0.95,
       ),
       itemCount: _catalog.length,
       itemBuilder: (_, i) => _OctRewardCard(
@@ -186,27 +186,27 @@ class _OctRewardCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(22),
         splashColor: Colors.teal.withOpacity(0.15),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               // Octagon shape
               CustomPaint(
-                size: const Size(88, 88),
+                size: const Size(72, 72),
                 painter: _OctPainter(color: fillColor),
                 child: SizedBox(
-                  width: 88,
-                  height: 88,
+                  width: 72,
+                  height: 72,
                   child: Center(
                     child: Icon(
                       reward.icon,
-                      size: 36,
+                      size: 30,
                       color: empty ? Colors.grey.shade400 : Colors.white,
                     ),
                   ),
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 8),
               // Label
               Text(
                 reward.label,

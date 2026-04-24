@@ -1507,10 +1507,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       width: 1, color: cs.outlineVariant),
                   const SizedBox(width: 10),
 
-                  // Task preview (up to 3 bullets)
+                  // Task preview: skip task 1 (index 0), show tasks 2–5 (up to 3)
                   Expanded(
-                    child: tasks.isEmpty ||
-                            (tasks.length == 1 && tasks[0].isEmpty)
+                    child: tasks.length <= 1 ||
+                            tasks.skip(1).where((t) => t.isNotEmpty).isEmpty
                         ? Text(
                             'Keine Aufgaben',
                             style: TextStyle(
@@ -1523,6 +1523,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             crossAxisAlignment:
                                 CrossAxisAlignment.start,
                             children: tasks
+                                .skip(1)
                                 .where((t) => t.isNotEmpty)
                                 .take(3)
                                 .map(
@@ -2042,7 +2043,6 @@ class _WeeklyPlannerDialogState extends State<WeeklyPlannerDialog> {
   late final List<bool> _expanded;
   late final List<int> _requiredOffsets;
   late final List<int> _optionalOffsets;
-  bool _canSave = false;
 
   TaskConfig _effectiveCfgForTask(int n) {
     if (widget.taskConfigs != null && n - 1 < widget.taskConfigs!.length) {
@@ -2078,31 +2078,12 @@ class _WeeklyPlannerDialogState extends State<WeeklyPlannerDialog> {
         (offset) => widget.controllers[day][offset].text.isNotEmpty,
       ),
     );
-    _updateCanSave();
-    for (int day = 0; day < 7; day++) {
-      for (final offset in _requiredOffsets) {
-        widget.controllers[day][offset].addListener(_updateCanSave);
-      }
-    }
+
   }
 
   @override
   void dispose() {
-    for (int day = 0; day < 7; day++) {
-      for (final offset in _requiredOffsets) {
-        widget.controllers[day][offset].removeListener(_updateCanSave);
-      }
-    }
     super.dispose();
-  }
-
-  void _updateCanSave() {
-    final allFilled = _requiredOffsets.every(
-      (offset) => widget.controllers.every(
-        (dc) => dc[offset].text.trim().isNotEmpty,
-      ),
-    );
-    if (allFilled != _canSave) setState(() => _canSave = allFilled);
   }
 
   @override
@@ -2124,7 +2105,7 @@ class _WeeklyPlannerDialogState extends State<WeeklyPlannerDialog> {
           child: const Text('Abbrechen'),
         ),
         FilledButton(
-          onPressed: _canSave ? () => Navigator.pop(context, true) : null,
+          onPressed: () => Navigator.pop(context, true),
           child: const Text('Speichern'),
         ),
       ],
@@ -2242,8 +2223,26 @@ class _AutocompleteField extends StatefulWidget {
 class _AutocompleteFieldState extends State<_AutocompleteField> {
   final FocusNode _focusNode = FocusNode();
 
+  // Tracks the internal fieldController provided by Autocomplete so we can
+  // attach/detach our sync listener exactly once per controller instance.
+  TextEditingController? _syncedController;
+
+  void _syncToExternal() {
+    if (_syncedController != null) {
+      widget.controller.text = _syncedController!.text;
+    }
+  }
+
+  void _attachTo(TextEditingController fc) {
+    if (_syncedController == fc) return;
+    _syncedController?.removeListener(_syncToExternal);
+    _syncedController = fc;
+    _syncedController!.addListener(_syncToExternal);
+  }
+
   @override
   void dispose() {
+    _syncedController?.removeListener(_syncToExternal);
     _focusNode.dispose();
     super.dispose();
   }
@@ -2265,24 +2264,16 @@ class _AutocompleteFieldState extends State<_AutocompleteField> {
         widget.onSubmitted?.call(selection);
       },
       fieldViewBuilder: (context, fieldController, focusNode, onEditingComplete) {
-        // Keep our external controller in sync.
-        // Only set text if it differs to avoid cursor-jump feedback loops.
-        if (fieldController.text != widget.controller.text) {
-          fieldController.text = widget.controller.text;
-        }
-        // Sync back: use a one-time setup via the controller's listener list
-        // length to avoid adding duplicate listeners across rebuilds.
-        if (!fieldController.hasListeners) {
-          fieldController.addListener(() {
-            widget.controller.text = fieldController.text;
-          });
-        }
+        // Attach our sync listener to this controller instance.
+        _attachTo(fieldController);
         return TextField(
           controller: fieldController,
           focusNode: focusNode,
           autofocus: true,
           textInputAction: widget.textInputAction,
           onSubmitted: (v) {
+            // Ensure external controller has the latest text before callback.
+            widget.controller.text = v;
             widget.onSubmitted?.call(v);
             onEditingComplete();
           },

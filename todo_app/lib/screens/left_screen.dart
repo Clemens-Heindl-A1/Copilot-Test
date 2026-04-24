@@ -236,7 +236,7 @@ class _LeftScreenState extends State<LeftScreen> {
           : RefreshIndicator(
               onRefresh: _load,
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 120),
                 children: [
                   _buildPeriodToggle(),
                   const SizedBox(height: 16),
