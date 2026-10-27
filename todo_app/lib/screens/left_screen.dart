@@ -418,7 +418,7 @@ class _LeftScreenState extends State<LeftScreen> {
                 ),
                 const Spacer(),
                 Text(
-                  'Gesamt (${ _period.label}): $total',
+                  '${_period.label}: $total',
                   style: TextStyle(
                       fontSize: 12, color: Colors.grey.shade600),
                 ),
