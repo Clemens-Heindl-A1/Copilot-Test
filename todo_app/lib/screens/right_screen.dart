@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../main.dart' show cinemaOpenedNotifier;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Model
@@ -32,7 +34,9 @@ class RightScreen extends StatefulWidget {
   State<RightScreen> createState() => _RightScreenState();
 }
 
-class _RightScreenState extends State<RightScreen> {
+class _RightScreenState extends State<RightScreen> with WidgetsBindingObserver {
+  static const _ytChannel = MethodChannel('com.todoapp.todo_app/youtube');
+
   static final List<_Reward> _catalog = [
     _Reward(key: 'gaming',    label: 'Gaming',       icon: Icons.sports_esports),
     _Reward(key: 'youtube',   label: 'YouTube',      icon: Icons.smart_display),
@@ -43,11 +47,53 @@ class _RightScreenState extends State<RightScreen> {
   ];
 
   bool _loading = true;
+  bool _accessibilityEnabled = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    cinemaOpenedNotifier.addListener(_onCinemaOpened);
     _loadCounts();
+    _checkAccessibility();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    cinemaOpenedNotifier.removeListener(_onCinemaOpened);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadCounts();
+      _checkAccessibility();
+    }
+  }
+
+  /// Called by [cinemaOpenedNotifier] when Chrome incognito is intercepted.
+  void _onCinemaOpened() {
+    final data = cinemaOpenedNotifier.value;
+    if (data == null) return;
+    cinemaOpenedNotifier.value = null; // consume
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _handleCinemaAccessDialog();
+    });
+  }
+
+  Future<void> _checkAccessibility() async {
+    try {
+      await _ytChannel.invokeMethod('requestNotificationPermission');
+    } catch (_) {}
+    try {
+      final enabled =
+          await _ytChannel.invokeMethod<bool>('hasAccessibilityPermission') ?? false;
+      if (mounted) setState(() => _accessibilityEnabled = enabled);
+    } on MissingPluginException {
+      // Not on Android — ignore.
+    } catch (_) {}
   }
 
   Future<void> _loadCounts() async {
@@ -66,8 +112,44 @@ class _RightScreenState extends State<RightScreen> {
   }
 
   Future<void> _onTap(_Reward reward) async {
-    // Already at minimum — warn the user.
+    final joker = _catalog.firstWhere((r) => r.key == 'mystery');
+
     if (reward.count <= 0) {
+      // ── Joker fallback: offer to substitute a joker for any empty reward ──
+      if (reward.key != 'mystery' && joker.count > 0) {
+        final useJoker = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            icon: Icon(reward.icon, size: 40, color: Colors.orange.shade400),
+            title: Text(reward.label),
+            content: Text(
+              'Du hast keine ${reward.label}-Belohnungen mehr.\n\n'
+              'Du hast noch ${joker.count} Joker.\n'
+              'Möchtest du einen Joker stattdessen verwenden?',
+              textAlign: TextAlign.center,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Abbrechen'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Joker verwenden'),
+              ),
+            ],
+          ),
+        );
+        if (useJoker == true) {
+          setState(() => joker.count--);
+          await _saveCount(joker);
+          if (reward.key == 'youtube') await _useYouTubeToken();
+          if (reward.key == 'cinema') await _useCinemaToken();
+        }
+        return;
+      }
+
+      // ── No tokens, no joker fallback ──
       await showDialog<void>(
         context: context,
         builder: (_) => AlertDialog(
@@ -89,7 +171,10 @@ class _RightScreenState extends State<RightScreen> {
       return;
     }
 
-    // Confirm use.
+    // ── Normal confirm dialog ──
+    final isYouTube = reward.key == 'youtube';
+    final isCinema  = reward.key == 'cinema';
+    final hasAction = isYouTube || isCinema;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -107,7 +192,7 @@ class _RightScreenState extends State<RightScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Einlösen'),
+            child: Text(hasAction ? 'Einlösen & öffnen' : 'Einlösen'),
           ),
         ],
       ),
@@ -116,7 +201,121 @@ class _RightScreenState extends State<RightScreen> {
     if (confirmed == true) {
       setState(() => reward.count--);
       await _saveCount(reward);
+      if (isYouTube) await _useYouTubeToken();
+      if (isCinema)  await _useCinemaToken();
     }
+  }
+
+  // ── YouTube helpers ───────────────────────────────────────────────────────
+
+  /// Launches YouTube after a normal reward redemption.
+  Future<void> _useYouTubeToken() async {
+    try {
+      await _ytChannel.invokeMethod('launchYouTube');
+    } on MissingPluginException {
+      // Not on Android — ignore.
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('YouTube konnte nicht geöffnet werden.')),
+        );
+      }
+    }
+  }
+
+  // ── Cinema (Chrome incognito) helpers ─────────────────────────────────────
+
+  /// Marks today as "cinema used" in prefs, then opens Chrome in incognito.
+  Future<void> _useCinemaToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final now   = DateTime.now();
+    final today =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    await prefs.setString('cinema_processed_date', today);
+    try {
+      await _ytChannel.invokeMethod('launchChromeIncognito');
+    } on MissingPluginException {
+      // Not on Android — ignore.
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Chrome Inkognito konnte nicht geöffnet werden.')),
+        );
+      }
+    }
+  }
+
+  /// Shows the cinema-access dialog triggered by the Accessibility Service.
+  Future<void> _handleCinemaAccessDialog() async {
+    await _loadCounts();
+    if (!mounted) return;
+
+    final cinemaReward = _catalog.firstWhere((r) => r.key == 'cinema');
+    final joker        = _catalog.firstWhere((r) => r.key == 'mystery');
+
+    final hasCinema = cinemaReward.count > 0;
+    final hasJoker  = joker.count > 0;
+
+    if (!hasCinema && !hasJoker) {
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          icon: Icon(Icons.movie_creation, size: 40, color: Colors.grey.shade400),
+          title: const Text('Film gesperrt'),
+          content: const Text(
+            'Du hast keine Film-Tokens und keine Joker mehr.\n'
+            'Verdiene Belohnungen, indem du deine Aufgaben erledigst!',
+            textAlign: TextAlign.center,
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+
+    final useJoker   = !hasCinema;
+    final tokenLabel = useJoker ? 'Joker' : 'Film-Token';
+    final tokenCount = useJoker ? joker.count : cinemaReward.count;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        icon: const Icon(Icons.movie_creation, size: 40, color: Colors.indigo),
+        title: const Text('Inkognito öffnen'),
+        content: Text(
+          'Du möchtest Chrome Inkognito öffnen.\n'
+          'Einen $tokenLabel einlösen?\n'
+          'Verbleibend: $tokenCount',
+          textAlign: TextAlign.center,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Abbrechen'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Einlösen & öffnen'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    if (useJoker) {
+      setState(() => joker.count--);
+      await _saveCount(joker);
+    } else {
+      setState(() => cinemaReward.count--);
+      await _saveCount(cinemaReward);
+    }
+    await _useCinemaToken();
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -130,10 +329,72 @@ class _RightScreenState extends State<RightScreen> {
         centerTitle: true,
         backgroundColor: Colors.teal.shade200,
         elevation: 0,
+        actions: const [],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _buildGrid(),
+          : Column(
+              children: [
+                if (!_accessibilityEnabled) _buildAccessibilityBanner(),
+                Expanded(child: _buildGrid()),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _openAccessibilityWithGuide() async {
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('App-Wächter aktivieren'),
+        content: const Text(
+          'Auf der nächsten Seite:\n\n'
+          '1. Suche „ToDo App" in der Liste und tippe darauf.\n'
+          '2. Tippe auf „ToDo App-Wächter".\n'
+          '3. Aktiviere den Schalter und bestätige mit „Zulassen".\n\n'
+          'Danach kehre zurück — der Banner verschwindet automatisch.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Abbrechen'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Zu den Einstellungen'),
+          ),
+        ],
+      ),
+    );
+    if (go == true) {
+      try {
+        await _ytChannel.invokeMethod('openAccessibilitySettings');
+      } catch (_) {}
+    }
+  }
+
+  Widget _buildAccessibilityBanner() {
+    return Material(
+      color: Colors.orange.shade100,
+      child: InkWell(
+        onTap: _openAccessibilityWithGuide,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              Icon(Icons.accessibility_new, color: Colors.orange.shade800, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'App-Wächter inaktiv — hier tippen, um ihn zu aktivieren.',
+                  style: TextStyle(fontSize: 12, color: Colors.orange.shade900),
+                ),
+              ),
+              Icon(Icons.chevron_right, color: Colors.orange.shade700),
+            ],
+          ),
+        ),
+      ),
     );
   }
 

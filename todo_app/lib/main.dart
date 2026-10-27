@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'debug_seed.dart';
 import 'screens/home_screen.dart';
 import 'screens/left_screen.dart';
 import 'screens/right_screen.dart';
+
+/// Notifies [RightScreen] that a Chrome-incognito (cinema) attempt was intercepted.
+/// Value: {'cinema_tokens': X, 'joker_tokens': Y}
+final cinemaOpenedNotifier = ValueNotifier<Map<String, int>?>(null);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -45,7 +50,8 @@ class SwipeNavigator extends StatefulWidget {
   State<SwipeNavigator> createState() => _SwipeNavigatorState();
 }
 
-class _SwipeNavigatorState extends State<SwipeNavigator> {
+class _SwipeNavigatorState extends State<SwipeNavigator> with WidgetsBindingObserver {
+  static const _ytChannel = MethodChannel('com.todoapp.todo_app/youtube');
   static const int _initialPage = 1;
 
   late final PageController _pageController;
@@ -56,8 +62,13 @@ class _SwipeNavigatorState extends State<SwipeNavigator> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pageController = PageController(initialPage: _initialPage);
     _pageController.addListener(_onPageChanged);
+    // Check for cinema actions that arrived before Flutter was ready.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _checkPendingCinemaAction();
+    });
   }
 
   void _onPageChanged() {
@@ -78,9 +89,43 @@ class _SwipeNavigatorState extends State<SwipeNavigator> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pageController.removeListener(_onPageChanged);
     _pageController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkPendingCinemaAction();
+    }
+  }
+
+  Future<void> _checkPendingCinemaAction() async {
+    try {
+      final raw = await _ytChannel
+          .invokeMethod<Map<Object?, Object?>>('getPendingCinemaAction');
+      if (raw == null || !mounted) return;
+      await _ytChannel.invokeMethod('clearPendingCinemaAction');
+
+      final cinemaToks = (raw['cinema_tokens'] as int?) ?? 0;
+      final jokerToks  = (raw['joker_tokens']  as int?) ?? 0;
+
+      await _pageController.animateToPage(
+        2,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+      if (!mounted) return;
+
+      cinemaOpenedNotifier.value = {
+        'cinema_tokens': cinemaToks,
+        'joker_tokens':  jokerToks,
+      };
+    } on MissingPluginException {
+      // Channel not available on non-Android platforms — ignore.
+    } catch (_) {}
   }
 
   static const _labels = ['Statistiken', 'Aufgaben', 'Belohnungen'];

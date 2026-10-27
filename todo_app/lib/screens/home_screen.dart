@@ -156,8 +156,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
-  DateTime _mondayOf(DateTime d) =>
-      d.subtract(Duration(days: d.weekday - 1));
+    DateTime _addCalendarDays(DateTime date, int days) =>
+      DateTime(date.year, date.month, date.day + days);
+
+    DateTime _mondayOf(DateTime d) => _addCalendarDays(d, 1 - d.weekday);
 
   String _taskKey(int n, DateTime date) =>
       'task${n}_${DateFormat('yyyy-MM-dd').format(date)}';
@@ -357,6 +359,11 @@ class _HomeScreenState extends State<HomeScreen> {
         _tasks[0].isDone = _allNextWeekTask2sSaved(prefs, date);
       }
     });
+    // Persist Sunday task-1 done state so stats/caches count it like any other task.
+    if (date.weekday == DateTime.sunday) {
+      final sundayDone = _allNextWeekTask2sSaved(prefs, date);
+      await prefs.setBool(_doneKey(1, date), sundayDone);
+    }
   }
 
   // ── Date navigation ───────────────────────────────────────────────────────
@@ -420,7 +427,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _navigateWeek(int delta) {
-    final newStart = _weekStart.add(Duration(days: 7 * delta));
+    final newStart = _addCalendarDays(_weekStart, 7 * delta);
     setState(() => _weekStart = newStart);
     _loadWeekCache(newStart);
   }
@@ -432,7 +439,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final doneCache = <String, int>{};
 
     for (int i = 0; i < 7; i++) {
-      final date = weekStart.add(Duration(days: i));
+      final date = _addCalendarDays(weekStart, i);
       final key  = DateFormat('yyyy-MM-dd').format(date);
       // Task 1: respect explicit saved value (e.g. skipped = empty string)
       final savedTask1 = prefs.getString(_taskKey(1, date));
@@ -472,9 +479,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // No repeating required tasks configured → the planner is always "done".
     if (requiredRepeating.isEmpty) return true;
 
-    final nextMonday = sunday.add(Duration(days: 8 - sunday.weekday));
+    final nextMonday = _addCalendarDays(sunday, 8 - sunday.weekday);
     for (int i = 0; i < 7; i++) {
-      final date = nextMonday.add(Duration(days: i));
+      final date = _addCalendarDays(nextMonday, i);
       for (final n in requiredRepeating) {
         if ((prefs.getString(_taskKey(n, date)) ?? '').isEmpty) return false;
       }
@@ -484,12 +491,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _openWeeklyPlanner() async {
     final nextMonday =
-        _viewedDate.add(Duration(days: 8 - _viewedDate.weekday));
+      _addCalendarDays(_viewedDate, 8 - _viewedDate.weekday);
     final prefs = await SharedPreferences.getInstance();
 
     final planControllers = List.generate(7, (day) {
       return List.generate(4, (offset) {
-        final date = nextMonday.add(Duration(days: day));
+        final date = _addCalendarDays(nextMonday, day);
         return TextEditingController(
           text: prefs.getString(_taskKey(offset + 2, date)) ?? '',
         );
@@ -512,7 +519,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     if (confirmed == true) {
       for (int day = 0; day < 7; day++) {
-        final date = nextMonday.add(Duration(days: day));
+        final date = _addCalendarDays(nextMonday, day);
         for (int offset = 0; offset < 4; offset++) {
           final taskNumber = offset + 2;
           if (!_isTaskRepeating(taskNumber)) continue;
@@ -526,6 +533,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         if (_allNextWeekTask2sSaved(prefs, _viewedDate)) {
           setState(() => _tasks[0].isDone = true);
+          await prefs.setBool(_doneKey(1, _viewedDate), true);
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content:
@@ -670,7 +678,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final lastMonday = DateTime.parse(lastResetStr);
       int completions = 0;
       for (int i = 0; i < 7; i++) {
-        final date = lastMonday.add(Duration(days: i));
+        final date = _addCalendarDays(lastMonday, i);
         if (prefs.getBool(_doneKey(5, date)) == true) completions++;
       }
       if (completions >= 7) {
@@ -719,8 +727,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// NOT complete, one Skip reward is deducted automatically.
   Future<void> _maybeDoAccountabilityCheck() async {
     final prefs = await SharedPreferences.getInstance();
-    final yesterday =
-        _dateOnly(DateTime.now()).subtract(const Duration(days: 1));
+    final yesterday = _addCalendarDays(_dateOnly(DateTime.now()), -1);
     final checkKey =
         'accountability_done_${DateFormat('yyyy-MM-dd').format(yesterday)}';
 
@@ -917,7 +924,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_viewMode == _ViewMode.weekly) {
       subtitle =
           '${DateFormat('dd. MMM').format(_weekStart)} – '
-          '${DateFormat('dd. MMM yyyy').format(_weekStart.add(const Duration(days: 6)))}';
+          '${DateFormat('dd. MMM yyyy').format(_addCalendarDays(_weekStart, 6))}';
     } else if (_viewMode == _ViewMode.monthly) {
       subtitle = DateFormat('MMMM yyyy').format(_monthStart);
     } else {
@@ -930,7 +937,7 @@ class _HomeScreenState extends State<HomeScreen> {
       } else if (_viewMode == _ViewMode.monthly) {
         _navigateMonth(-1);
       } else {
-        _switchToDate(_viewedDate.subtract(const Duration(days: 1)));
+        _switchToDate(_addCalendarDays(_viewedDate, -1));
       }
     }
 
@@ -940,7 +947,7 @@ class _HomeScreenState extends State<HomeScreen> {
       } else if (_viewMode == _ViewMode.monthly) {
         _navigateMonth(1);
       } else {
-        _switchToDate(_viewedDate.add(const Duration(days: 1)));
+        _switchToDate(_addCalendarDays(_viewedDate, 1));
       }
     }
 
@@ -1451,7 +1458,7 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
       itemCount: 7,
       itemBuilder: (_, i) {
-        final date    = _weekStart.add(Duration(days: i));
+        final date    = _addCalendarDays(_weekStart, i);
         final dateKey = DateFormat('yyyy-MM-dd').format(date);
         final tasks     = _weekCache[dateKey] ?? [_dayTasks[date.weekday] ?? ''];
         final done      = _weekDoneCache[dateKey] ?? 0;
@@ -2113,7 +2120,11 @@ class _WeeklyPlannerDialogState extends State<WeeklyPlannerDialog> {
   }
 
   Widget _buildDaySection(int day) {
-    final date = widget.nextMonday.add(Duration(days: day));
+    final date = DateTime(
+      widget.nextMonday.year,
+      widget.nextMonday.month,
+      widget.nextMonday.day + day,
+    );
     final dayLabel =
         '${widget.weekdayLabels[day]}  (${DateFormat('dd.MM.').format(date)})';
 

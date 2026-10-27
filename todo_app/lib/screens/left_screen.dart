@@ -23,8 +23,8 @@ extension _PeriodX on _Period {
   String get label {
     switch (this) {
       case _Period.lifetime: return 'Gesamt';
-      case _Period.year:     return 'Dieses Jahr';
-      case _Period.month:    return 'Dieser Monat';
+      case _Period.year:     return 'Jahr';
+      case _Period.month:    return 'Monat';
     }
   }
 }
