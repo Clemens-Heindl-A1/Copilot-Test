@@ -90,3 +90,6 @@ Thumbs.db
 .packages
 # Android native build output
 **/android/app/.cxx/
+
+# Android build output
+**/android/build/

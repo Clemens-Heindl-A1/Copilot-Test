@@ -45,7 +45,7 @@ class SwipeNavigator extends StatefulWidget {
   State<SwipeNavigator> createState() => _SwipeNavigatorState();
 }
 
-class _SwipeNavigatorState extends State<SwipeNavigator> {
+class _SwipeNavigatorState extends State<SwipeNavigator> with WidgetsBindingObserver {
   static const int _initialPage = 1;
 
   late final PageController _pageController;
@@ -56,6 +56,7 @@ class _SwipeNavigatorState extends State<SwipeNavigator> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pageController = PageController(initialPage: _initialPage);
     _pageController.addListener(_onPageChanged);
   }
@@ -78,6 +79,7 @@ class _SwipeNavigatorState extends State<SwipeNavigator> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pageController.removeListener(_onPageChanged);
     _pageController.dispose();
     super.dispose();

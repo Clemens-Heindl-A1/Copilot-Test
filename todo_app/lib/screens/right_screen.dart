@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,6 +34,8 @@ class RightScreen extends StatefulWidget {
 }
 
 class _RightScreenState extends State<RightScreen> {
+  static const _ytChannel = MethodChannel('com.todoapp.todo_app/youtube');
+
   static final List<_Reward> _catalog = [
     _Reward(key: 'gaming',    label: 'Gaming',       icon: Icons.sports_esports),
     _Reward(key: 'youtube',   label: 'YouTube',      icon: Icons.smart_display),
@@ -43,11 +46,15 @@ class _RightScreenState extends State<RightScreen> {
   ];
 
   bool _loading = true;
-
   @override
   void initState() {
     super.initState();
     _loadCounts();
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
   }
 
   Future<void> _loadCounts() async {
@@ -66,8 +73,67 @@ class _RightScreenState extends State<RightScreen> {
   }
 
   Future<void> _onTap(_Reward reward) async {
-    // If reward is at 0 or below, warn about streak loss consequence.
+    final joker = _catalog.firstWhere((r) => r.key == 'mystery');
+
     if (reward.count <= 0) {
+      // ── Joker fallback: offer to substitute a joker for any empty reward ──
+      if (reward.key != 'mystery' && joker.count > 0) {
+        final useJoker = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            icon: Icon(reward.icon, size: 40, color: Colors.orange.shade400),
+            title: Text(reward.label),
+            content: Text(
+              'Du hast keine ${reward.label}-Belohnungen mehr.\n\n'
+              'Du hast noch ${joker.count} Joker.\n'
+              'Möchtest du einen Joker stattdessen verwenden?',
+              textAlign: TextAlign.center,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Abbrechen'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Joker verwenden'),
+              ),
+            ],
+          ),
+        );
+        if (useJoker == true) {
+          setState(() => joker.count--);
+          await _saveCount(joker);
+          if (reward.key == 'youtube') await _useYouTubeToken();
+          if (reward.key == 'cinema') await _useCinemaToken();
+        }
+        return;
+      }
+
+      // ── Debt limit: balance can't go below -1 ──
+      if (reward.count <= -1) {
+        await showDialog<void>(
+          context: context,
+          builder: (_) => AlertDialog(
+            icon: Icon(reward.icon, size: 40, color: Colors.red.shade400),
+            title: Text(reward.label),
+            content: const Text(
+              'Du bist bereits im Minus (-1).\n'
+              'Verdiene zuerst neue Belohnungen!',
+              textAlign: TextAlign.center,
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
+      // ── No tokens, no joker: warn about debt + streak loss ──
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (_) => AlertDialog(
@@ -97,7 +163,9 @@ class _RightScreenState extends State<RightScreen> {
 
       setState(() => reward.count--);
       await _saveCount(reward);
-      
+      if (reward.key == 'youtube') await _useYouTubeToken();
+      if (reward.key == 'cinema') await _useCinemaToken();
+
       // Lose the streak when going into debt
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('stat_streak_current', 0);
@@ -117,7 +185,10 @@ class _RightScreenState extends State<RightScreen> {
       return;
     }
 
-    // Confirm use when count > 0.
+    // ── Normal confirm dialog ──
+    final isYouTube = reward.key == 'youtube';
+    final isCinema  = reward.key == 'cinema';
+    final hasAction = isYouTube || isCinema;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -135,7 +206,7 @@ class _RightScreenState extends State<RightScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Einlösen'),
+            child: Text(hasAction ? 'Einlösen & öffnen' : 'Einlösen'),
           ),
         ],
       ),
@@ -144,6 +215,42 @@ class _RightScreenState extends State<RightScreen> {
     if (confirmed == true) {
       setState(() => reward.count--);
       await _saveCount(reward);
+      if (isYouTube) await _useYouTubeToken();
+      if (isCinema)  await _useCinemaToken();
+    }
+  }
+
+  // ── YouTube helpers ───────────────────────────────────────────────────────
+
+  /// Launches YouTube after a normal reward redemption.
+  Future<void> _useYouTubeToken() async {
+    try {
+      await _ytChannel.invokeMethod('launchYouTube');
+    } on MissingPluginException {
+      // Not on Android — ignore.
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('YouTube konnte nicht geöffnet werden.')),
+        );
+      }
+    }
+  }
+
+  // ── Cinema (Chrome incognito) helpers ─────────────────────────────────────
+
+  /// Opens Chrome in incognito after a normal reward redemption.
+  Future<void> _useCinemaToken() async {
+    try {
+      await _ytChannel.invokeMethod('launchChromeIncognito');
+    } on MissingPluginException {
+      // Not on Android — ignore.
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Chrome Inkognito konnte nicht geöffnet werden.')),
+        );
+      }
     }
   }
 
@@ -161,7 +268,9 @@ class _RightScreenState extends State<RightScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _buildGrid(),
+          : Column(
+              children: [Expanded(child: _buildGrid())],
+            ),
     );
   }
 
