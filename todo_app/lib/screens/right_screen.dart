@@ -66,30 +66,58 @@ class _RightScreenState extends State<RightScreen> {
   }
 
   Future<void> _onTap(_Reward reward) async {
-    // Already at minimum — warn the user.
+    // If reward is at 0 or below, warn about streak loss consequence.
     if (reward.count <= 0) {
-      await showDialog<void>(
+      final confirmed = await showDialog<bool>(
         context: context,
         builder: (_) => AlertDialog(
-          icon: Icon(reward.icon, size: 40, color: Colors.teal.shade300),
+          icon: Icon(reward.icon, size: 40, color: Colors.red.shade400),
           title: Text(reward.label),
-          content: const Text(
-            'Du hast keine dieser Belohnungen mehr.\n'
-            'Verdiene sie zuerst!',
+          content: Text(
+            'Du hast keine "${reward.label}"-Belohnungen mehr.\n\n'
+            'Wenn du eine jetzt einlöst, gehst du in die Schulden (${reward.count - 1}) '
+            'und verlierst deinen Streak! ⚠️',
             textAlign: TextAlign.center,
           ),
           actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Abbrechen'),
+            ),
             FilledButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('OK'),
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Trotzdem EINLÖSEN'),
             ),
           ],
         ),
       );
+
+      if (confirmed != true) return;
+
+      setState(() => reward.count--);
+      await _saveCount(reward);
+      
+      // Lose the streak when going into debt
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('stat_streak_current', 0);
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '⚠️ Dein Streak ist weg! '
+              '${reward.label}-Saldo: ${reward.count}',
+            ),
+            backgroundColor: Colors.red.shade600,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
       return;
     }
 
-    // Confirm use.
+    // Confirm use when count > 0.
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -168,15 +196,29 @@ class _OctRewardCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final empty = reward.count <= 0;
-    final fillColor  = empty ? Colors.grey.shade300  : Colors.teal.shade400;
-    final cardColor  = empty ? Colors.grey.shade50   : Colors.teal.shade50;
-    final textColor  = empty ? Colors.grey.shade500  : Colors.teal.shade800;
-    final badgeBg    = empty ? Colors.grey.shade200  : Colors.teal.shade100;
-    final badgeBorder= empty ? Colors.grey.shade400  : Colors.teal.shade300;
+    final inDebt = reward.count < 0;
+    
+    final fillColor  = inDebt
+        ? Colors.red.shade400
+        : (empty ? Colors.grey.shade300  : Colors.teal.shade400);
+    final cardColor  = inDebt
+        ? Colors.red.shade50
+        : (empty ? Colors.grey.shade50   : Colors.teal.shade50);
+    final textColor  = inDebt
+        ? Colors.red.shade800
+        : (empty ? Colors.grey.shade500  : Colors.teal.shade800);
+    final badgeBg    = inDebt
+        ? Colors.red.shade100
+        : (empty ? Colors.grey.shade200  : Colors.teal.shade100);
+    final badgeBorder= inDebt
+        ? Colors.red.shade400
+        : (empty ? Colors.grey.shade400  : Colors.teal.shade300);
 
     return Card(
       elevation: empty ? 1 : 4,
-      shadowColor: empty ? Colors.transparent : Colors.teal.withOpacity(0.25),
+      shadowColor: inDebt
+          ? Colors.red.withOpacity(0.25)
+          : (empty ? Colors.transparent : Colors.teal.withOpacity(0.25)),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(22),
       ),
@@ -201,7 +243,9 @@ class _OctRewardCard extends StatelessWidget {
                     child: Icon(
                       reward.icon,
                       size: 30,
-                      color: empty ? Colors.grey.shade400 : Colors.white,
+                      color: inDebt
+                          ? Colors.white
+                          : (empty ? Colors.grey.shade400 : Colors.white),
                     ),
                   ),
                 ),
@@ -227,7 +271,7 @@ class _OctRewardCard extends StatelessWidget {
                   border: Border.all(color: badgeBorder),
                 ),
                 child: Text(
-                  'x${reward.count}',
+                  inDebt ? 'x${reward.count} ⚠️' : 'x${reward.count}',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.bold,

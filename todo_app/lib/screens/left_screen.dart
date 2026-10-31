@@ -23,8 +23,8 @@ extension _PeriodX on _Period {
   String get label {
     switch (this) {
       case _Period.lifetime: return 'Gesamt';
-      case _Period.year:     return 'Dieses Jahr';
-      case _Period.month:    return 'Dieser Monat';
+      case _Period.year:     return 'Jahr';
+      case _Period.month:    return 'Monat';
     }
   }
 }
@@ -49,7 +49,8 @@ class _Stats {
   /// Derives all stats by scanning the raw `done{n}_{date}` and
   /// `task{n}_{date}` keys in SharedPreferences.  This means every change
   /// to past/future tasks is immediately reflected without any separate
-  /// counter bookkeeping.
+  /// counter bookkeeping. Skipped tasks are tracked separately but do not
+  /// count toward completion stats.
   static Future<_Stats> load(_Period period) async {
     final prefs = await SharedPreferences.getInstance();
     final now   = DateTime.now();
@@ -418,7 +419,7 @@ class _LeftScreenState extends State<LeftScreen> {
                 ),
                 const Spacer(),
                 Text(
-                  'Gesamt (${ _period.label}): $total',
+                  '${ _period.label}: $total',
                   style: TextStyle(
                       fontSize: 12, color: Colors.grey.shade600),
                 ),

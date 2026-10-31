@@ -165,6 +165,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String _doneKey(int n, DateTime date) =>
       'done${n}_${DateFormat('yyyy-MM-dd').format(date)}';
 
+  String _skipKey(int n, DateTime date) =>
+      'skip${n}_${DateFormat('yyyy-MM-dd').format(date)}';
+
   static const String _historyKey = 'task_title_history';
 
   Future<void> _loadTaskHistory() async {
@@ -526,6 +529,8 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         if (_allNextWeekTask2sSaved(prefs, _viewedDate)) {
           setState(() => _tasks[0].isDone = true);
+          // Mark task 1 as completed for this Sunday
+          await _saveDoneState(1, _viewedDate, true);
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content:
@@ -601,6 +606,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _saveDoneState(int n, DateTime date, bool done) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_doneKey(n, date), done);
+    // If marking as done, clear the skip state; if not done, don't clear
+    // to allow independent tracking of both states
+    if (done) {
+      await prefs.remove(_skipKey(n, date));
+    }
   }
 
   Future<void> _saveTaskTitle(int n, DateTime date, String title) async {
@@ -636,8 +646,10 @@ class _HomeScreenState extends State<HomeScreen> {
       _tasks[index].title  = '';
       _tasks[index].isDone = false;
     });
+    final prefs = await SharedPreferences.getInstance();
     await _saveTaskTitle(index + 1, _viewedDate, '');
     await _saveDoneState(index + 1, _viewedDate, false);
+    await prefs.setBool(_skipKey(index + 1, _viewedDate), true);
   }
 
   // ── Weekly reward reset ───────────────────────────────────────────────────
@@ -776,35 +788,64 @@ class _HomeScreenState extends State<HomeScreen> {
           .where((n) => !(actuallyDone?.contains(n) ?? false))
           .toList();
 
+      // Save the done state for confirmed tasks.
+      for (final n in actuallyDone ?? <int>{}) {
+        await _saveDoneState(n, yesterday, true);
+      }
+
       if (stillMissed.isEmpty) {
         // User confirmed all were done — maintain streak, no penalty.
         await _updateStreak(true);
         return;
       }
 
+      // Check which tasks have already been marked as skipped (from dialog).
+      final alreadySkipped = <int>{};
+      for (final n in stillMissed) {
+        if (prefs.getBool(_skipKey(n, yesterday)) == true) {
+          alreadySkipped.add(n);
+        }
+      }
+
+      // Mark tasks as skipped only if not already done in the dialog.
+      for (final n in stillMissed) {
+        if (!alreadySkipped.contains(n)) {
+          await prefs.setBool(_skipKey(n, yesterday), true);
+        }
+      }
+
       // Check if the skip balance can cover all missed tasks.
       final skipBalance = prefs.getInt('reward_skip') ?? 0;
-      final streakMaintained = skipBalance >= stillMissed.length;
+      
+      // Only deduct skips for tasks that weren't already skipped in the dialog.
+      final skipsToDeduct = stillMissed.length - alreadySkipped.length;
+      if (skipsToDeduct > 0) {
+        final streakMaintained = skipBalance >= skipsToDeduct;
 
-      // Deduct one Skip per missed mandatory task.
-      await prefs.setInt(
-          'reward_skip', (skipBalance - stillMissed.length).clamp(-1, 999));
+        // Deduct one Skip per missed mandatory task (not already skipped).
+        await prefs.setInt(
+            'reward_skip', (skipBalance - skipsToDeduct).clamp(-1, 999));
 
-      // Update streak.
-      await _updateStreak(streakMaintained);
+        // Update streak.
+        await _updateStreak(streakMaintained);
 
-      if (mounted) {
-        final msg = streakMaintained
-            ? '🔒 ${stillMissed.length} Skip(s) verbraucht — '
-              'dein Streak bleibt erhalten!'
-            : '💪 Streak verloren: zu wenige Skips für '
-              '${stillMissed.length} verpasste Task(s).';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(msg),
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        if (mounted) {
+          final msg = streakMaintained
+              ? '🔒 ${skipsToDeduct} Skip(s) verbraucht — '
+                'dein Streak bleibt erhalten!'
+              : '💪 Streak verloren: zu wenige Skips für '
+                '${skipsToDeduct} verpasste Task(s).';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(msg),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      } else {
+        // All remaining tasks were already skipped in the dialog.
+        final streakMaintained = skipBalance >= 0;
+        await _updateStreak(streakMaintained);
       }
     });
   }
@@ -864,8 +905,10 @@ class _HomeScreenState extends State<HomeScreen> {
         _tasks[index].isDone = false;
         _editingIndex        = null;
       });
+      final prefs = await SharedPreferences.getInstance();
       await _saveTaskTitle(index + 1, _viewedDate, '');
       await _saveDoneState(index + 1, _viewedDate, false);
+      await prefs.setBool(_skipKey(index + 1, _viewedDate), true);
       return;
     }
 
@@ -1018,7 +1061,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         _AppBarLabelButton(
           icon: Icons.settings,
-          label: 'Einstellung',
+          label: 'Einstellungen',
           onTap: _openSettings,
         ),
       ],
@@ -1933,11 +1976,71 @@ class _AccountabilityDialog extends StatefulWidget {
 
 class _AccountabilityDialogState extends State<_AccountabilityDialog> {
   late final Set<int> _checked; // tasks the user says they DID complete
+  int _skipBalance = 0;
 
   @override
   void initState() {
     super.initState();
     _checked = {};
+    _loadSkipBalance();
+  }
+
+  Future<void> _loadSkipBalance() async {
+    final prefs = await SharedPreferences.getInstance();
+    final balance = prefs.getInt('reward_skip') ?? 0;
+    if (mounted) setState(() => _skipBalance = balance);
+  }
+
+  Future<void> _skipAllUnchecked() async {
+    final missedCount = widget.missed.length - _checked.length;
+    if (missedCount <= 0) {
+      // All are already confirmed as done
+      if (mounted) Navigator.pop(context, Set<int>.from(_checked));
+      return;
+    }
+
+    if (_skipBalance < missedCount) {
+      // Not enough skips
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Nicht genug Skips vorhanden. Du brauchst $missedCount, hast aber nur $_skipBalance.',
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
+    // Mark all unchecked as "will be skipped"
+    final toSkip = widget.missed.keys
+        .where((n) => !_checked.contains(n))
+        .toList();
+
+    // Consume the skips
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('reward_skip', _skipBalance - missedCount);
+
+    // Mark these tasks as skipped in storage
+    for (final n in toSkip) {
+      await prefs.setBool(
+        'skip${n}_${DateFormat('yyyy-MM-dd').format(widget.date)}',
+        true,
+      );
+    }
+
+    if (mounted) {
+      Navigator.pop(context, Set<int>.from(_checked));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '⏭️ $missedCount Task(s) übersprungen — $missedCount Skip(s) verbraucht!',
+          ),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
   }
 
   @override
@@ -1993,10 +2096,27 @@ class _AccountabilityDialogState extends State<_AccountabilityDialog> {
                 style: TextStyle(
                     fontSize: 12, color: Colors.orange.shade700),
               ),
+              const SizedBox(height: 8),
+              Text(
+                'Skip-Saldo: $_skipBalance',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _skipBalance >= missedCount
+                      ? Colors.green.shade700
+                      : Colors.red.shade700,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ],
         ],
       ),
       actions: [
+        if (missedCount > 0)
+          TextButton(
+            onPressed:
+                _skipBalance >= missedCount ? _skipAllUnchecked : null,
+            child: const Text('Alle überspringen'),
+          ),
         FilledButton(
           onPressed: () => Navigator.pop(context, Set<int>.from(_checked)),
           child: const Text('Bestätigen'),

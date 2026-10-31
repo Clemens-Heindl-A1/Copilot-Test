@@ -71,3 +71,22 @@ app.*.map.json
 !**/ios/**/default.mode2v3
 !**/ios/**/default.pbxuser
 !**/ios/**/default.perspectivev3
+
+# Windows build
+**/windows/flutter/ephemeral/
+**/windows/runner/Debug/
+**/windows/runner/Release/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS files
+Thumbs.db
+
+# Runtime artifacts
+.dart_tool/
+.packages
+# Android native build output
+**/android/app/.cxx/
