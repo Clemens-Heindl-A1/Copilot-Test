@@ -31,10 +31,5 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
-        <!-- Allow launching YouTube -->
-        <package android:name="com.google.android.youtube" />
-        <!-- Allow detecting Chrome incognito -->
-        <package android:name="com.android.chrome" />
-        <package android:name="com.google.android.apps.chrome" />
     </queries>
 </manifest>

@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,8 +33,6 @@ class RightScreen extends StatefulWidget {
 }
 
 class _RightScreenState extends State<RightScreen> {
-  static const _ytChannel = MethodChannel('com.todoapp.todo_app/youtube');
-
   static final List<_Reward> _catalog = [
     _Reward(key: 'gaming',    label: 'Gaming',       icon: Icons.sports_esports),
     _Reward(key: 'youtube',   label: 'YouTube',      icon: Icons.smart_display),
@@ -104,8 +101,6 @@ class _RightScreenState extends State<RightScreen> {
         if (useJoker == true) {
           setState(() => joker.count--);
           await _saveCount(joker);
-          if (reward.key == 'youtube') await _useYouTubeToken();
-          if (reward.key == 'cinema') await _useCinemaToken();
         }
         return;
       }
@@ -163,8 +158,6 @@ class _RightScreenState extends State<RightScreen> {
 
       setState(() => reward.count--);
       await _saveCount(reward);
-      if (reward.key == 'youtube') await _useYouTubeToken();
-      if (reward.key == 'cinema') await _useCinemaToken();
 
       // Lose the streak when going into debt
       final prefs = await SharedPreferences.getInstance();
@@ -186,9 +179,6 @@ class _RightScreenState extends State<RightScreen> {
     }
 
     // ── Normal confirm dialog ──
-    final isYouTube = reward.key == 'youtube';
-    final isCinema  = reward.key == 'cinema';
-    final hasAction = isYouTube || isCinema;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -206,7 +196,7 @@ class _RightScreenState extends State<RightScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: Text(hasAction ? 'Einlösen & öffnen' : 'Einlösen'),
+            child: const Text('Einlösen'),
           ),
         ],
       ),
@@ -215,42 +205,6 @@ class _RightScreenState extends State<RightScreen> {
     if (confirmed == true) {
       setState(() => reward.count--);
       await _saveCount(reward);
-      if (isYouTube) await _useYouTubeToken();
-      if (isCinema)  await _useCinemaToken();
-    }
-  }
-
-  // ── YouTube helpers ───────────────────────────────────────────────────────
-
-  /// Launches YouTube after a normal reward redemption.
-  Future<void> _useYouTubeToken() async {
-    try {
-      await _ytChannel.invokeMethod('launchYouTube');
-    } on MissingPluginException {
-      // Not on Android — ignore.
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('YouTube konnte nicht geöffnet werden.')),
-        );
-      }
-    }
-  }
-
-  // ── Cinema (Chrome incognito) helpers ─────────────────────────────────────
-
-  /// Opens Chrome in incognito after a normal reward redemption.
-  Future<void> _useCinemaToken() async {
-    try {
-      await _ytChannel.invokeMethod('launchChromeIncognito');
-    } on MissingPluginException {
-      // Not on Android — ignore.
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Chrome Inkognito konnte nicht geöffnet werden.')),
-        );
-      }
     }
   }
 
